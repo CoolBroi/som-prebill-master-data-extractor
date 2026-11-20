@@ -1,274 +1,251 @@
 from __future__ import annotations
 
 from io import BytesIO
-import re
 from copy import copy
+import re
 from typing import Any
 
 import pandas as pd
 import streamlit as st
 from openpyxl import load_workbook
 
-st.set_page_config(page_title="SOM Pre-Bill Master Data Extractor", page_icon="📊", layout="wide")
+st.set_page_config(page_title="SOM Pre-Bill Auto Extractor", page_icon="📊", layout="wide")
 
 st.markdown("""
 <style>
-.block-container{padding-top:2rem;padding-bottom:3rem;max-width:1400px}
-.hero{padding:1.5rem 1.7rem;border-radius:16px;background:linear-gradient(115deg,#14213d,#244b78);color:white;margin-bottom:1.2rem}
-.hero h1{color:white;margin:0 0 .35rem 0;font-size:2rem}.hero p{color:#dbeafe;margin:0}
-.step{background:#f1f5f9;border-radius:10px;padding:12px 14px;height:100%;color:#1e293b}
-.small{color:#64748b;font-size:.88rem}
+.block-container{max-width:1320px;padding-top:2rem}
+.hero{padding:1.6rem 1.8rem;border-radius:16px;background:linear-gradient(115deg,#14213d,#244b78);color:white;margin-bottom:1.2rem}
+.hero h1{color:white;margin:0 0 .35rem;font-size:2rem}.hero p{color:#dbeafe;margin:0}
+.metric{padding:1rem;border:1px solid rgba(128,128,128,.25);border-radius:12px}
 </style>
-<div class="hero"><h1>Pre-Bill → Master Data Template</h1>
-<p>Extract RU worksheet data, determine Tower / Track using mapping evidence, review the assignments, and export the completed Excel template.</p></div>
+<div class="hero"><h1>Pre-Bill Auto Extractor</h1>
+<p>Upload your Pre-Bill and Master Data Template. The app detects worksheets, headers, mapping tables and output columns automatically.</p></div>
 """, unsafe_allow_html=True)
 
-st.markdown("**Workflow**")
-c1,c2,c3=st.columns(3)
-for col,num,title,desc in [(c1,"01","Upload","Pre-Bill workbook and Master Data Template"),(c2,"02","Map & review","Use a mapping sheet or assign Tower / Track per RU sheet"),(c3,"03","Export","Update matching template rows or append new rows")]:
-    col.markdown(f'<div class="step"><b>{num} · {title}</b><br><span class="small">{desc}</span></div>',unsafe_allow_html=True)
+def norm(v: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(v or "").strip().lower())
 
-def norm(x: Any) -> str:
-    return re.sub(r"[^a-z0-9]+","",str(x or "").strip().lower())
+def clean(v: Any) -> str:
+    if pd.isna(v): return ""
+    return str(v).strip()
 
-def read_frames(file_bytes: bytes) -> dict[str,pd.DataFrame]:
-    return pd.read_excel(BytesIO(file_bytes),sheet_name=None,header=None,dtype=object)
-
-def guess_header(df: pd.DataFrame) -> int:
-    best_i,best_score=0,-1
-    for i in range(min(12,len(df))):
-        vals=[str(v).strip() for v in df.iloc[i].tolist() if pd.notna(v) and str(v).strip()]
-        score=len(vals)+sum(2 for v in vals if any(k in norm(v) for k in ["tower","track","project","service","description","resource","item","product","wbs","ru"]))
-        if score>best_score: best_i,best_score=i,score
-    return best_i
-
-def unique_headers(raw_headers: list[Any]) -> list[str]:
-    """Give repeated Excel headings unique dataframe labels without losing their meaning."""
-    seen={}
-    result=[]
-    for i,value in enumerate(raw_headers):
-        base=str(value).strip() if pd.notna(value) and str(value).strip() else f"Column {i+1}"
-        seen[base]=seen.get(base,0)+1
-        label=base if seen[base]==1 else f"{base} ({seen[base]})"
+def unique_headers(values):
+    seen, result = {}, []
+    for i, value in enumerate(values):
+        base = clean(value) or f"Column {i+1}"
+        seen[base] = seen.get(base, 0) + 1
+        label = base if seen[base] == 1 else f"{base} ({seen[base]})"
         while label in result:
-            seen[base]+=1
-            label=f"{base} ({seen[base]})"
+            seen[base] += 1
+            label = f"{base} ({seen[base]})"
         result.append(label)
     return result
 
-def as_table(df: pd.DataFrame, header_row: int) -> tuple[list[str],pd.DataFrame]:
-    if df.empty or header_row < 0 or header_row >= len(df):
-        raise ValueError("Selected header row is outside the worksheet's available rows.")
-    header=unique_headers(df.iloc[header_row].tolist())
-    data=df.iloc[header_row+1:].copy()
-    data.columns=header
-    data=data.dropna(how="all").reset_index(drop=True)
-    return header,data
+def detect_header(raw: pd.DataFrame, template=False):
+    best = None
+    terms = ["tower","track","customerid","deviceid","sowproductname","projectcode","ratingmodel","description","service","product","resource","item","wbs","key"]
+    for i in range(min(20, len(raw))):
+        vals = [norm(x) for x in raw.iloc[i].tolist() if clean(x)]
+        if not vals: continue
+        score = len(vals) + sum(3 for x in vals if any(t in x for t in terms))
+        if template and any(x in {"tower","track"} for x in vals): score += 20
+        if best is None or score > best[0]: best = (score, i)
+    return best[1] if best else 0
 
-def find_col(cols, terms):
-    for i,c in enumerate(cols):
-        if norm(c) in terms: return i
-    return 0
+def make_table(raw, header_idx):
+    headers = unique_headers(raw.iloc[header_idx].tolist())
+    data = raw.iloc[header_idx+1:].copy()
+    data.columns = headers
+    data = data.dropna(how="all").reset_index(drop=True)
+    return headers, data
 
-def mapping_from_rules(row_values, rules):
-    text=" ".join(str(v) for v in row_values if pd.notna(v)).lower()
-    matches=[]
-    for keyword,tower,track in rules:
-        kw=str(keyword).strip().lower()
-        if kw and kw in text:
-            matches.append((len(kw),tower,track,kw))
-    if not matches: return None
-    matches.sort(reverse=True)
-    return matches[0][1],matches[0][2],matches[0][3]
+def find_header_col(headers, aliases):
+    aliases = {norm(x) for x in aliases}
+    for h in headers:
+        if norm(h) in aliases: return h
+    for h in headers:
+        if any(a in norm(h) for a in aliases): return h
+    return None
 
-def copy_row_style(ws, source_row, target_row, max_col):
+def workbook_sheets(upload):
+    return pd.read_excel(BytesIO(upload.getvalue()), sheet_name=None, header=None, dtype=object)
+
+def analyse_template(raw_sheets):
+    candidates = []
+    for name, raw in raw_sheets.items():
+        hr = detect_header(raw, template=True)
+        headers, df = make_table(raw, hr)
+        tower = find_header_col(headers, ["Tower"])
+        track = find_header_col(headers, ["Track"])
+        score = (20 if tower else 0) + (20 if track else 0)
+        score += sum(3 for x in ["Customer ID","Device ID","SOW Product Name","Rating Model","#Key"] if find_header_col(headers,[x]))
+        candidates.append((score, name, hr, headers, df, tower, track))
+    candidates.sort(key=lambda x:x[0], reverse=True)
+    return candidates[0]
+
+def extract_mapping_rules(sheet_tables):
+    rules, mapping_sheets = [], []
+    for sheet, (headers, df, _) in sheet_tables.items():
+        tower_col = find_header_col(headers, ["Tower"])
+        track_col = find_header_col(headers, ["Track"])
+        if not tower_col or not track_col: continue
+        mapping_sheets.append(sheet)
+        keyword_cols = [h for h in headers if h not in {tower_col, track_col} and any(k in norm(h) for k in ["service","description","product","item","resource","ru","keyword","name","towertrack"])]
+        if not keyword_cols:
+            keyword_cols = [h for h in headers if h not in {tower_col, track_col}]
+        for _, row in df.iterrows():
+            tw, tr = clean(row.get(tower_col)), clean(row.get(track_col))
+            if not tw or not tr: continue
+            for col in keyword_cols:
+                key = clean(row.get(col))
+                if len(key) >= 4:
+                    rules.append((key.lower(), tw, tr, sheet))
+    # Keep all rules; collisions are detected when matching a row.
+    return rules, mapping_sheets
+
+def match_tower_track(row, rules):
+    haystack = " | ".join(clean(v).lower() for v in row.tolist() if clean(v))
+    found = []
+    for keyword, tower, track, source in rules:
+        if keyword in haystack:
+            found.append((len(keyword), tower, track, keyword, source))
+    if not found: return "", "", "No matching Tower/Track rule found"
+    found.sort(key=lambda x:x[0], reverse=True)
+    best_len = found[0][0]
+    best = {(x[1], x[2]) for x in found if x[0] == best_len}
+    if len(best) > 1: return "", "", "Conflicting mapping rules — review required"
+    tower, track = next(iter(best))
+    return tower, track, f"Matched '{found[0][3]}' from {found[0][4]}"
+
+def copy_style(ws, source_row, target_row, max_col):
     if source_row < 1: return
-    for col in range(1,max_col+1):
-        src=ws.cell(source_row,col); dst=ws.cell(target_row,col)
-        if src.has_style: dst._style=copy(src._style)
-        if src.number_format: dst.number_format=src.number_format
-        if src.alignment: dst.alignment=copy(src.alignment)
-        if src.protection: dst.protection=copy(src.protection)
+    for c in range(1, max_col+1):
+        src, dst = ws.cell(source_row,c), ws.cell(target_row,c)
+        if src.has_style: dst._style = copy(src._style)
+        if src.number_format: dst.number_format = src.number_format
 
-st.header("1. Upload files")
-left,right=st.columns(2)
-with left:
-    prebill=st.file_uploader("Pre-Bill workbook",type=["xlsx","xlsm"],key="prebill")
-with right:
-    template=st.file_uploader("Master Data Template",type=["xlsx","xlsm"],key="template")
+st.markdown("### Upload files")
+a,b = st.columns(2)
+with a: prebill = st.file_uploader("Pre-Bill workbook", type=["xlsx","xlsm"], key="pb")
+with b: template = st.file_uploader("Master Data Template", type=["xlsx","xlsm"], key="mt")
 if not prebill or not template:
-    st.info("Upload both workbooks to continue. Files are processed in this Streamlit session and are not saved to this GitHub repository.")
+    st.info("Upload both Excel files. Worksheet and column configuration is automatic.")
     st.stop()
 
 try:
-    pre_bytes=prebill.getvalue(); template_bytes=template.getvalue()
-    source_sheets=read_frames(pre_bytes)
-    keep_vba=template.name.lower().endswith(".xlsm")
-    target_wb=load_workbook(BytesIO(template_bytes),keep_vba=keep_vba)
-except Exception as exc:
-    st.error(f"Could not read one of the workbooks: {exc}")
+    src_raw = workbook_sheets(prebill)
+    tmpl_bytes = template.getvalue()
+    keep_vba = template.name.lower().endswith(".xlsm")
+    out_wb = load_workbook(BytesIO(tmpl_bytes), keep_vba=keep_vba)
+    tmpl_raw = workbook_sheets(template)
+except Exception as e:
+    st.error(f"Unable to read the uploaded workbooks: {e}")
     st.stop()
 
-st.success(f"Loaded {len(source_sheets)} Pre-Bill worksheets and {len(target_wb.sheetnames)} template worksheets.")
-st.header("2. Select the target template")
-t1,t2,t3=st.columns(3)
-with t1:
-    target_sheet=st.selectbox("Template worksheet",target_wb.sheetnames)
-target_ws=target_wb[target_sheet]
-with t2:
-    header_row=st.number_input("Template header row",min_value=1,max_value=100,value=1,step=1)
-with t3:
-    tower_col_letter=st.text_input("Tower column (Excel letter)",value="H").strip().upper()
-    track_col_letter=st.text_input("Track column (Excel letter)",value="I").strip().upper()
+# Detect all source worksheet headers and classify sheets.
+source_tables = {}
+for name, raw in src_raw.items():
+    hr = detect_header(raw)
+    headers, df = make_table(raw, hr)
+    source_tables[name] = (headers, df, hr)
 
-def col_num(letter):
-    from openpyxl.utils.cell import column_index_from_string
-    try: return column_index_from_string(letter)
-    except Exception: return None
+rules, mapping_sheets = extract_mapping_rules(source_tables)
+template_pick = analyse_template(tmpl_raw)
+_, target_name, target_header_idx, target_headers, target_df, target_tower_header, target_track_header = template_pick
+target_ws = out_wb[target_name]
 
-tower_col=col_num(tower_col_letter); track_col=col_num(track_col_letter)
-if not tower_col or not track_col:
-    st.error("Enter valid Excel column letters, for example H and I.")
+# A source sheet is a data/RU sheet if it has actual records and is not an obvious cover/summary/mapping sheet.
+ru_sheets = []
+for name, (headers, df, hr) in source_tables.items():
+    n = norm(name)
+    if len(df) == 0: continue
+    if any(x in n for x in ["summary","cover","contents","index","mapping","masterdata","towertrack"]): continue
+    if name in mapping_sheets: continue
+    # Ignore sheets that are only a small lookup table; keep actual CPO/RU tabs.
+    ru_sheets.append(name)
+
+st.markdown("### Automatic detection results")
+m1,m2,m3,m4 = st.columns(4)
+for col, value, label in [
+    (m1, len(ru_sheets), "RU / data worksheets"),
+    (m2, len(mapping_sheets), "Mapping worksheets"),
+    (m3, target_name, "Detected template sheet"),
+    (m4, f"Row {target_header_idx+1}", "Template header row")
+]:
+    col.markdown(f'<div class="metric"><b>{value}</b><br><small>{label}</small></div>', unsafe_allow_html=True)
+
+st.caption("Detected template fields: " + ", ".join(target_headers[:35]))
+if not ru_sheets:
+    st.error("No data worksheets were detected in the Pre-Bill workbook. Check that the workbook contains populated RU sheets.")
+    st.stop()
+if not target_tower_header or not target_track_header:
+    st.error("The Master Data Template was detected, but its Tower and/or Track columns could not be identified by header. Please check that the template contains columns named Tower and Track.")
     st.stop()
 
-target_headers={str(target_ws.cell(int(header_row),c).value or f"Column {c}").strip():c for c in range(1,max(target_ws.max_column,tower_col,track_col)+1)}
-st.caption("Detected template headers: "+", ".join(list(target_headers.keys())[:30]))
-
-st.header("3. Configure RU sheets and Tower / Track rules")
-all_sheet_names=list(source_sheets)
-default_selected=[s for s in all_sheet_names if s.strip().lower() not in ["summary","cover","contents","index"]]
-selected_sheets=st.multiselect("Pre-Bill worksheets to process",all_sheet_names,default=default_selected or all_sheet_names)
-if not selected_sheets:
-    st.warning("Select at least one worksheet.")
-    st.stop()
-
-with st.expander("Optional: use a mapping / master sheet from the Pre-Bill workbook",expanded=False):
-    st.write("If a supporting sheet contains keywords or service names with their Tower and Track, configure it here. The app uses the longest matching keyword found in each source row.")
-    map_sheet=st.selectbox("Mapping worksheet",["(Do not use a mapping sheet)"]+all_sheet_names)
-    rules=[]
-    if map_sheet!="(Do not use a mapping sheet)":
-        map_raw=source_sheets[map_sheet]
-        map_hdr_guess=guess_header(map_raw)
-        map_hdr=st.number_input("Mapping sheet header row",min_value=1,max_value=100,value=map_hdr_guess+1,key="map_header")-1
-        map_cols,map_df=as_table(map_raw,int(map_hdr))
-        st.dataframe(map_df.head(5),use_container_width=True)
-        kw_col=st.selectbox("Keyword / service / RU description column",map_cols,key="kw")
-        map_tower=st.selectbox("Mapping Tower column",map_cols,index=find_col(map_cols,{"tower"}),key="mt")
-        map_track=st.selectbox("Mapping Track column",map_cols,index=find_col(map_cols,{"track"}),key="mr")
-        for _,r in map_df.iterrows():
-            kw=r.get(kw_col); tw=r.get(map_tower); tr=r.get(map_track)
-            if pd.notna(kw) and pd.notna(tw) and pd.notna(tr):
-                rules.append((str(kw),str(tw),str(tr)))
-
-st.caption("For each RU sheet, confirm its header row and default Tower / Track. When mapping rules are available, matched rows use the rule; unmatched rows use the sheet defaults and are flagged for review.")
-sheet_configs={}
-with st.expander("Review source worksheet structure",expanded=True):
-    for s in selected_sheets:
-        raw=source_sheets[s]
-        hdr_guess=guess_header(raw)
-        with st.container(border=True):
-            st.subheader(s)
-            default_hdr=st.number_input(f"Header row · {s}",min_value=1,max_value=100,value=hdr_guess+1,key=f"hdr_{s}")-1
-            cols,data=as_table(raw,int(default_hdr))
-            st.dataframe(data.head(4),use_container_width=True)
-            a,b=st.columns(2)
-            with a:
-                tower=st.text_input(f"Default Tower · {s}",value="",key=f"tower_{s}")
-            with b:
-                track=st.text_input(f"Default Track · {s}",value="",key=f"track_{s}")
-            sheet_configs[s]={"header":int(default_hdr),"tower":tower.strip(),"track":track.strip(),"columns":cols,"data":data}
-
-st.header("4. Choose how to populate the template")
-mode=st.radio("Output method",["Match existing template rows using a common key","Append extracted source rows to the template"],horizontal=False)
-match_config=None
-if mode.startswith("Match"):
-    m1,m2=st.columns(2)
-    with m1:
-        source_key_sheet=st.selectbox("Source sheet used for key matching",selected_sheets)
-        source_cols=sheet_configs[source_key_sheet]["columns"]
-        source_key=st.selectbox("Pre-Bill key column",source_cols,key="source_key")
-    with m2:
-        target_header_names=list(target_headers.keys())
-        target_key_name=st.selectbox("Template key column",target_header_names,key="target_key")
-    match_config=(source_key_sheet,source_key,target_headers[target_key_name])
+if mapping_sheets:
+    st.success("Detected mapping source(s): " + ", ".join(mapping_sheets))
 else:
-    st.warning("Append mode adds source data rows below the existing template data. Use match mode when the template already contains the target records.")
+    st.warning("No supporting worksheet with explicit Tower and Track columns was detected. The app will extract the data, but it will leave Tower/Track blank rather than invent business mappings.")
 
-if rules:
-    st.success(f"{len(rules)} mapping rules loaded from '{map_sheet}'.")
-else:
-    st.info("No mapping rules configured. Default Tower / Track values must be entered for each selected worksheet.")
+# Extract rows and automatically map same-named columns to template.
+template_norm_to_col = {}
+for c in range(1, target_ws.max_column+1):
+    h = clean(target_ws.cell(target_header_idx+1,c).value)
+    if h: template_norm_to_col[norm(h)] = c
 
-if st.button("Build preview",type="primary",use_container_width=True):
-    extracted=[]; unresolved=0
-    for s,cfg in sheet_configs.items():
-        data=cfg["data"]
-        for _,row in data.iterrows():
-            values=row.tolist()
-            if not any(pd.notna(v) and str(v).strip() for v in values): continue
-            found=mapping_from_rules(values,rules) if rules else None
-            if found:
-                tower,track,reason=found; status=f"Matched keyword: {reason}"
-            else:
-                tower,track=cfg["tower"],cfg["track"];status="Default / needs review"
-                unresolved+=1
-            rec={col:row.get(col) for col in cfg["columns"]}
-            rec["Tower"]=tower;rec["Track"]=track;rec["Source Worksheet"]=s;rec["Mapping Status"]=status
-            extracted.append(rec)
-    if not extracted:
-        st.error("No data rows were extracted. Check the selected sheets and header rows.")
-    else:
-        st.session_state["extracted_rows"]=extracted
-        st.session_state["mapping_unresolved"]=unresolved
-        st.success(f"Preview ready: {len(extracted)} data rows. {unresolved} rows use default values and need review.")
-        preview=pd.DataFrame(extracted)
-        st.dataframe(preview,use_container_width=True,height=360)
-        st.download_button("Download extracted-data review CSV",preview.to_csv(index=False).encode("utf-8-sig"),"prebill_extraction_review.csv","text/csv")
+output_records, source_counts = [], {}
+for sheet in ru_sheets:
+    headers, df, hr = source_tables[sheet]
+    source_counts[sheet] = len(df)
+    for _, row in df.iterrows():
+        if not any(clean(v) for v in row.tolist()): continue
+        tower, track, status = match_tower_track(row, rules)
+        record = {h: row.get(h) for h in headers}
+        record["Tower"] = tower
+        record["Track"] = track
+        record["_Source Sheet"] = sheet
+        record["_Mapping Status"] = status
+        output_records.append(record)
 
-if "extracted_rows" in st.session_state:
-    st.header("5. Generate completed Master Data Template")
-    output_rows=st.session_state["extracted_rows"]
-    st.caption(f"{len(output_rows)} rows ready · {st.session_state.get('mapping_unresolved',0)} rows flagged for review.")
-    if st.button("Generate Excel output",type="primary",use_container_width=True):
-        ws=target_wb[target_sheet]
-        updated=0; appended=0; skipped=0
-        if mode.startswith("Match"):
-            source_key_sheet,source_key,target_key_col=match_config
-            lookup={}
-            for rec in output_rows:
-                if rec["Source Worksheet"]!=source_key_sheet: continue
-                key=str(rec.get(source_key,"")).strip()
-                if key and key not in lookup: lookup[key]=rec
-            target_lookup={}
-            for r in range(int(header_row)+1,ws.max_row+1):
-                key=str(ws.cell(r,target_key_col).value or "").strip()
-                if key: target_lookup[key]=r
-            for key,rec in lookup.items():
-                target_r=target_lookup.get(key)
-                if not target_r: skipped+=1;continue
-                ws.cell(target_r,tower_col).value=rec.get("Tower")
-                ws.cell(target_r,track_col).value=rec.get("Track")
-                updated+=1
-        else:
-            start_row=ws.max_row+1
-            for rec in output_rows:
-                out_row=start_row+appended
-                copy_row_style(ws,max(int(header_row)+1,ws.max_row),out_row,max(ws.max_column,tower_col,track_col))
-                for col_idx in range(1,ws.max_column+1):
-                    h=str(ws.cell(int(header_row),col_idx).value or "").strip()
-                    if h in rec and h not in ["Tower","Track"]:
-                        ws.cell(out_row,col_idx).value=rec[h]
-                ws.cell(out_row,tower_col).value=rec.get("Tower")
-                ws.cell(out_row,track_col).value=rec.get("Track")
-                appended+=1
-        out=BytesIO()
-        target_wb.save(out);out.seek(0)
-        ext=".xlsm" if keep_vba else ".xlsx"
-        st.download_button("Download completed Master Data Template",data=out.getvalue(),file_name="Master_Data_Template_Completed"+ext,mime="application/vnd.ms-excel.sheet.macroEnabled.12" if keep_vba else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        if mode.startswith("Match"):
-            st.success(f"Output generated. Updated {updated} rows; {skipped} extracted keys were not found in the template.")
-        else:
-            st.success(f"Output generated. Appended {appended} rows.")
-        if st.session_state.get("mapping_unresolved",0):
-            st.warning("Some rows use default Tower / Track values. Review the extraction CSV and output before using the file for SAP migration.")
-        st.info("The tool only prepares an Excel file. It does not connect to SAP or create master data.")
+if not output_records:
+    st.error("No data rows found in the detected RU worksheets.")
+    st.stop()
+
+preview = pd.DataFrame(output_records)
+# Show source sheet detection and mapping quality.
+st.markdown("### Extraction preview")
+x1,x2,x3 = st.columns(3)
+x1.metric("Extracted rows", len(preview))
+x2.metric("Tower/Track matched", int(((preview["Tower"] != "") & (preview["Track"] != "")).sum()))
+x3.metric("Needs mapping review", int(((preview["Tower"] == "") | (preview["Track"] == "")).sum()))
+with st.expander("Detected worksheets and row counts", expanded=False):
+    st.dataframe(pd.DataFrame([{"Worksheet":k,"Detected rows":v,"Header row":source_tables[k][2]+1} for k,v in source_counts.items()]), use_container_width=True)
+with st.expander("Preview extracted records", expanded=True):
+    st.dataframe(preview.head(200), use_container_width=True, height=420)
+
+st.markdown("### Generate Master Data Template")
+st.write("Source columns are copied automatically when their names match template column names. Tower and Track are written to the detected template columns.")
+if st.button("Generate completed Master Data Template", type="primary", use_container_width=True):
+    ws = out_wb[target_name]
+    start_row = max(ws.max_row + 1, target_header_idx + 2)
+    written = 0
+    for idx, rec in enumerate(output_records):
+        row_num = start_row + idx
+        copy_style(ws, max(target_header_idx+2, ws.max_row), row_num, max(ws.max_column, len(target_headers)))
+        for key, value in rec.items():
+            if key.startswith("_"): continue
+            target_col = template_norm_to_col.get(norm(key))
+            if target_col:
+                ws.cell(row_num, target_col).value = value
+        ws.cell(row_num, template_norm_to_col[norm(target_tower_header)]).value = rec["Tower"]
+        ws.cell(row_num, template_norm_to_col[norm(target_track_header)]).value = rec["Track"]
+        written += 1
+    result = BytesIO()
+    out_wb.save(result)
+    st.download_button("Download completed Master Data Template", data=result.getvalue(),
+        file_name="Master_Data_Template_Completed" + (".xlsm" if keep_vba else ".xlsx"),
+        mime="application/vnd.ms-excel.sheet.macroEnabled.12" if keep_vba else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.success(f"Prepared {written} rows in '{target_name}'.")
+    if any(not r["Tower"] or not r["Track"] for r in output_records):
+        st.warning("Some Tower/Track values are blank because no authoritative mapping rule matched. Review those rows before SAP migration.")
+    st.info("The workbook is prepared only; this app does not create or update SAP records.")
