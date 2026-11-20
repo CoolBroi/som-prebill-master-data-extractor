@@ -86,7 +86,7 @@ def score_product(product, desc):
     return round(coverage*100,1)
 def match_products(products,vbrp,template):
     desc_col=find_col(vbrp.columns,["Item Description"])
-    date_col=find_col(vbrp.columns,["Pricing Date","Pricing date","Price Date"])
+    date_col=find_col(vbrp.columns,["Pricing Date","Pricing date","Pricing Dt","Price Date"])
     if not desc_col:raise ValueError("VBRP Item Description column was not found.")
     v=vbrp[vbrp[desc_col].notna()].copy();v[desc_col]=v[desc_col].map(text)
     v["_pricing_date"]=pd.to_datetime(v[date_col],errors="coerce",dayfirst=True) if date_col else pd.NaT
@@ -155,7 +155,7 @@ review=sum(m["status"].startswith("Review required") for m in unique);high=len(u
 x,y,z=st.columns(3);x.metric("Unique VBRP product records",len(unique));y.metric("Exact / strong matches",high);z.metric("Needs review",review)
 st.dataframe(pd.DataFrame([{"ARC RRC RU Name":m["ru"],"VBRP Item Description":m["desc"],"Pricing Date":m.get("pricing_date"),"Match Score":m["score"],"Match Status":m["status"]} for m in unique]),use_container_width=True,height=400)
 if unmatched:st.warning("No VBRP match detected for: "+", ".join(unmatched))
-st.caption("The existing template's SOW Product Name is used as an approved alias when its product terms clearly match the RU. Otherwise, the RU name is matched directly. Ambiguous matches are flagged; unmatched products are listed in Match_Audit.")
+st.caption("Only one VBRP row is selected per RU product. When multiple matching VBRP rows are available, the row with the latest Pricing Dt is selected. Competing product descriptions are flagged for review; unmatched products are listed in Match_Audit.")
 
 if st.button("Generate Master Data Template",type="primary",use_container_width=True):
     keep_vba=tmpl.name.lower().endswith(".xlsm");wb=load_workbook(BytesIO(tmpl.getvalue()),keep_vba=keep_vba);ws=wb[tn]
