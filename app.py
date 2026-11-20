@@ -166,11 +166,7 @@ if st.button("Generate Master Data Template",type="primary",use_container_width=
         for ix,r in td.iterrows():
             n=text(r.get(sow))
             if n:rowmap.setdefault(norm(n),hr+1+int(ix))
-    used=set();nextrow=ws.max_row+1;written=0;audit=[]
-    tower=hmap.get(norm(find_col(headers,["Tower"]) or ""));track=hmap.get(norm(find_col(headers,["Track"]) or ""))
-    for rr in range(first,ws.max_row+1):
-        if tower:ws.cell(rr,tower).value=None
-        if track:ws.cell(rr,track).value=None
+    used=set();nextrow=ws.max_row+1;written=0
     for m in unique:
         r=m["vbrp"];source=rowmap.get(norm(m["alias"])) or rowmap.get(norm(m["ru"])) or rowmap.get(norm(m["desc"]))
         if source and source not in used:outrow=source;used.add(source)
@@ -181,24 +177,14 @@ if st.button("Generate Master Data Template",type="primary",use_container_width=
         def put(names,value):
             h=find_col(headers,names)
             if h:ws.cell(outrow,hmap[norm(h)]).value=value
-        sold=find_col(cols,["Sold-to","Customer ID"]);stat=find_col(cols,["StatKF","Device ID"]);cocd=find_col(cols,["CoCd","Company Code"]);proj=find_col(cols,["Project definition","Project Code"]);mat=find_col(cols,["Material"]);bill=find_col(cols,["Bill. Doc.","Billing Document"])
+        sold=find_col(cols,["Sold-to","Customer ID"]);stat=find_col(cols,["StatKF","Device ID"]);cocd=find_col(cols,["CoCd","Company Code"]);proj=find_col(cols,["Project definition","Project Code"])
         put(["SOW Product Name","SOW Product Name (Display text : this is Item Description on Invoice)"],m["desc"])
         put(["Customer ID"],r.get(sold) if sold else None);put(["Device ID"],r.get(stat) if stat else None)
         put(["Company Code","CoCd"],r.get(cocd) if cocd else None);put(["Project Code","Project definition"],r.get(proj) if proj else None)
-        put(["Tower"],None);put(["Track"],None);put(["Output 2 Name"],"QTY");put(["Output 2 Value"],m["qty"])
-        audit.append({"ARC RRC RU Name":m["ru"],"Lookup Product Label":m["alias"],"Template Output Row":outrow,"Baseline Volume":m["qty"],"VBRP Item Description":m["desc"],"Match Score":m["score"],"Match Status":m["status"],"Customer ID (Sold-to)":r.get(sold) if sold else None,"Device ID (StatKF)":r.get(stat) if stat else None,"Company Code (CoCd)":r.get(cocd) if cocd else None,"Project Code":r.get(proj) if proj else None,"Material":r.get(mat) if mat else None,"Billing Document":r.get(bill) if bill else None})
+        put(["Output 2 Name"],"QTY");put(["Output 2 Value"],m["qty"])
         written+=1
-    for ru in unmatched:audit.append({"ARC RRC RU Name":ru,"Match Status":"No VBRP match"})
-    if "Match_Audit" in wb.sheetnames:del wb["Match_Audit"]
-    aw=wb.create_sheet("Match_Audit");adf=pd.DataFrame(audit)
-    for j,h in enumerate(adf.columns,1):aw.cell(1,j).value=h
-    for i,row in enumerate(adf.itertuples(index=False,name=None),2):
-        for j,val in enumerate(row,1):aw.cell(i,j).value=None if pd.isna(val) else val
-    aw.freeze_panes="A2";aw.auto_filter.ref=aw.dimensions
-    for col in aw.columns:
-        letter=col[0].column_letter;length=max(len(str(c.value)) if c.value is not None else 0 for c in col);aw.column_dimensions[letter].width=min(max(length+2,14),48)
     buf=BytesIO();wb.save(buf)
-    st.success(f"Updated or generated {written} product records. Existing template rows were reused where possible.")
-    if review:st.warning(f"{review} records need product-match review. See the Match_Audit worksheet before SAP migration.")
+    st.success(f"Generated {written} product records directly in the original Master Data Template format. The template's worksheets, columns and formatting are retained.")
+    if review:st.warning(f"{review} selected records need review. Check the match status shown above before using the workbook.")
     st.download_button("Download completed Master Data Template",data=buf.getvalue(),file_name="Master_Data_Template_Product_Matched"+(".xlsm" if keep_vba else ".xlsx"),mime="application/vnd.ms-excel.sheet.macroEnabled.12" if keep_vba else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True)
     st.info("This tool prepares the workbook only; it does not create or update SAP records.")
