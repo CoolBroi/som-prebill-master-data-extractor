@@ -8,7 +8,6 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter
 
 st.set_page_config(page_title="SOM Pre-Bill Master Data Extractor", page_icon="📊", layout="wide")
 
@@ -43,8 +42,24 @@ def guess_header(df: pd.DataFrame) -> int:
         if score>best_score: best_i,best_score=i,score
     return best_i
 
+def unique_headers(raw_headers: list[Any]) -> list[str]:
+    """Give repeated Excel headings unique dataframe labels without losing their meaning."""
+    seen={}
+    result=[]
+    for i,value in enumerate(raw_headers):
+        base=str(value).strip() if pd.notna(value) and str(value).strip() else f"Column {i+1}"
+        seen[base]=seen.get(base,0)+1
+        label=base if seen[base]==1 else f"{base} ({seen[base]})"
+        while label in result:
+            seen[base]+=1
+            label=f"{base} ({seen[base]})"
+        result.append(label)
+    return result
+
 def as_table(df: pd.DataFrame, header_row: int) -> tuple[list[str],pd.DataFrame]:
-    header=[str(v).strip() if pd.notna(v) and str(v).strip() else f"Column {i+1}" for i,v in enumerate(df.iloc[header_row].tolist())]
+    if df.empty or header_row < 0 or header_row >= len(df):
+        raise ValueError("Selected header row is outside the worksheet's available rows.")
+    header=unique_headers(df.iloc[header_row].tolist())
     data=df.iloc[header_row+1:].copy()
     data.columns=header
     data=data.dropna(how="all").reset_index(drop=True)
@@ -103,8 +118,7 @@ target_ws=target_wb[target_sheet]
 with t2:
     header_row=st.number_input("Template header row",min_value=1,max_value=100,value=1,step=1)
 with t3:
-    start_col_default="H"
-    tower_col_letter=st.text_input("Tower column (Excel letter)",value=start_col_default).strip().upper()
+    tower_col_letter=st.text_input("Tower column (Excel letter)",value="H").strip().upper()
     track_col_letter=st.text_input("Track column (Excel letter)",value="I").strip().upper()
 
 def col_num(letter):
@@ -220,7 +234,6 @@ if "extracted_rows" in st.session_state:
         updated=0; appended=0; skipped=0
         if mode.startswith("Match"):
             source_key_sheet,source_key,target_key_col=match_config
-            source_data=sheet_configs[source_key_sheet]["data"]
             lookup={}
             for rec in output_rows:
                 if rec["Source Worksheet"]!=source_key_sheet: continue
@@ -241,7 +254,6 @@ if "extracted_rows" in st.session_state:
             for rec in output_rows:
                 out_row=start_row+appended
                 copy_row_style(ws,max(int(header_row)+1,ws.max_row),out_row,max(ws.max_column,tower_col,track_col))
-                # Copy source fields into template columns where normalized headers match.
                 for col_idx in range(1,ws.max_column+1):
                     h=str(ws.cell(int(header_row),col_idx).value or "").strip()
                     if h in rec and h not in ["Tower","Track"]:
