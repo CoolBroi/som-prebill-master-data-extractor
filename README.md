@@ -1,15 +1,47 @@
-# SOM Pre-Bill Auto Extractor
+# SOM Product Master Data Extractor
 
-Streamlit app that automatically detects Pre-Bill data worksheets, header rows, a Master Data Template worksheet, Tower / Track columns, and supporting mapping tables.
+Streamlit application that matches product names from the **ARC RRC** worksheet to **VBRP Item Description** values and prepares the **Master Data Template**.
+
+## Inputs
+
+1. **ARC RRC workbook** — reads the numbered rows under `Resource Unit (RU)` and `Baseline Volume`.
+2. **VBRP dump** — identifies `Item Description`, `Sold-to`, `StatKF`, `CoCd`, `Project definition`, and `Material`.
+3. **Master Data Template** — detects the template worksheet and its existing `SOW Product Name` values.
+
+## Automatic workflow
+
+1. Upload the three Excel workbooks. The app detects the relevant worksheets and header rows automatically.
+2. Read each numbered ARC RRC RU as a product name.
+3. Use an existing SOW Product Name in the template as an approved alias only when its product terms clearly correspond to the RU; otherwise match the RU directly.
+4. Match the product label to VBRP `Item Description`. Exact descriptions are preferred. Ambiguous matches and products with no match are identified.
+5. Populate the template with:
+   - SOW Product Name ← VBRP Item Description
+   - Customer ID ← VBRP Sold-to
+   - Device ID ← VBRP StatKF
+   - Company Code ← VBRP CoCd
+   - Project Code ← VBRP Project definition
+   - Output 2 Name / Value ← QTY / ARC RRC Baseline Volume
+6. Reuse existing product rows where possible; append additional VBRP product variants.
+7. Add a `Match_Audit` worksheet with source RU, matched description, score/status, and VBRP identifiers.
+
+Tower and Track are not used by this workflow and their values are cleared in the generated product rows. Other template configuration fields are retained from the corresponding existing template row where available.
+
+## Matching and validation
+
+- Exact VBRP descriptions are preferred when an existing template product label matches exactly.
+- Product-token matching is used for product variants such as server, RHEL, and backup descriptions.
+- Multiple candidate descriptions, shared matches across RU names, and no-match RU names are flagged in `Match_Audit`.
+- A similarity/token score is a matching aid, not proof of a correct business decision. Review flagged rows before SAP migration.
+- The app does not invent a VBRP match when no meaningful product terms are found.
 
 ## Deploy on Streamlit Community Cloud
 
-1. Sign in at https://share.streamlit.io/ with the GitHub account that can access this repository.
-2. Click **Create app**.
+1. Sign in at https://share.streamlit.io/ using the GitHub account with access to this repository.
+2. Select **Create app**.
 3. Repository: `CoolBroi/som-prebill-master-data-extractor`
 4. Branch: `main`
 5. Main file path: `app.py`
-6. Click **Deploy**.
+6. Click **Deploy**. Streamlit will install packages from `requirements.txt`.
 
 ## Run locally
 
@@ -23,21 +55,4 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Automatic workflow
-
-1. Upload the Pre-Bill workbook and Master Data Template.
-2. The app scans worksheets and detects likely RU/data sheets and header rows.
-3. It detects the template worksheet and the Tower / Track columns from their headings.
-4. It scans supporting sheets for explicit Tower and Track columns and builds keyword mapping rules from their other columns.
-5. It extracts rows and matches Tower / Track where a rule matches.
-6. It appends fields to the output template when source and template column headings match, then offers the completed workbook for download.
-
-## Mapping and safety notes
-
-- No worksheet, header row, output column letter, or mapping-column selection is required in the normal workflow.
-- Tower / Track is only filled when an explicit supporting mapping table provides a match. If no mapping table exists, or a match is ambiguous, the value is left blank and flagged rather than guessed.
-- The app currently uses keyword matching. It must be tested against representative Pre-Bill workbooks and the authoritative business mapping before production migration use.
-- Source columns are copied only when their normalized header names match a template header. Different names require an explicit business-approved mapping enhancement.
-- This tool prepares Excel files only; it does not connect to SAP or create SAP master data.
-- Uploaded workbook contents are processed by the Streamlit app and are not committed to this public GitHub repository. Do not commit confidential customer files.
-- Validate the downloaded workbook, including formatting and formulas, before SAP use.
+The app prepares an Excel workbook only. It does not connect to SAP or create SAP master data. Uploaded customer workbooks are processed by the app and should never be committed to this public repository.
