@@ -1,251 +1,198 @@
 from __future__ import annotations
-
-from io import BytesIO
 from copy import copy
+from io import BytesIO
 import re
-from typing import Any
-
 import pandas as pd
 import streamlit as st
 from openpyxl import load_workbook
+from rapidfuzz import fuzz, utils
 
-st.set_page_config(page_title="SOM Pre-Bill Auto Extractor", page_icon="📊", layout="wide")
-
+st.set_page_config(page_title="SOM Product Master Data Extractor", page_icon="📦", layout="wide")
 st.markdown("""
-<style>
-.block-container{max-width:1320px;padding-top:2rem}
-.hero{padding:1.6rem 1.8rem;border-radius:16px;background:linear-gradient(115deg,#14213d,#244b78);color:white;margin-bottom:1.2rem}
-.hero h1{color:white;margin:0 0 .35rem;font-size:2rem}.hero p{color:#dbeafe;margin:0}
-.metric{padding:1rem;border:1px solid rgba(128,128,128,.25);border-radius:12px}
-</style>
-<div class="hero"><h1>Pre-Bill Auto Extractor</h1>
-<p>Upload your Pre-Bill and Master Data Template. The app detects worksheets, headers, mapping tables and output columns automatically.</p></div>
+<style>.block-container{max-width:1450px;padding-top:1.5rem}.hero{padding:1.4rem 1.7rem;border-radius:16px;background:linear-gradient(115deg,#14213d,#244b78);color:white;margin-bottom:1rem}.hero h1{color:white;margin:0 0 .35rem;font-size:2rem}.hero p{color:#dbeafe;margin:0}</style>
+<div class="hero"><h1>SOM Product Master Data Extractor</h1><p>Match ARC RRC Resource Unit names to VBRP Item Descriptions and populate the Master Data Template.</p></div>
 """, unsafe_allow_html=True)
 
-def norm(v: Any) -> str:
-    return re.sub(r"[^a-z0-9]+", "", str(v or "").strip().lower())
+STOP={"compute","support","service","services","management","license","licenses","charge","charges","the","and","for","of","on","to","month","monthly","one","time","billing","os","instance","years","year","committed","resource","unit","ru","february","march","april","2026"}
+LOC={"adc","hdc","ldc","rdc"}
 
-def clean(v: Any) -> str:
-    if pd.isna(v): return ""
-    return str(v).strip()
-
-def unique_headers(values):
-    seen, result = {}, []
-    for i, value in enumerate(values):
-        base = clean(value) or f"Column {i+1}"
-        seen[base] = seen.get(base, 0) + 1
-        label = base if seen[base] == 1 else f"{base} ({seen[base]})"
-        while label in result:
-            seen[base] += 1
-            label = f"{base} ({seen[base]})"
-        result.append(label)
-    return result
-
-def detect_header(raw: pd.DataFrame, template=False):
-    best = None
-    terms = ["tower","track","customerid","deviceid","sowproductname","projectcode","ratingmodel","description","service","product","resource","item","wbs","key"]
-    for i in range(min(20, len(raw))):
-        vals = [norm(x) for x in raw.iloc[i].tolist() if clean(x)]
-        if not vals: continue
-        score = len(vals) + sum(3 for x in vals if any(t in x for t in terms))
-        if template and any(x in {"tower","track"} for x in vals): score += 20
-        if best is None or score > best[0]: best = (score, i)
-    return best[1] if best else 0
-
-def make_table(raw, header_idx):
-    headers = unique_headers(raw.iloc[header_idx].tolist())
-    data = raw.iloc[header_idx+1:].copy()
-    data.columns = headers
-    data = data.dropna(how="all").reset_index(drop=True)
-    return headers, data
-
-def find_header_col(headers, aliases):
-    aliases = {norm(x) for x in aliases}
-    for h in headers:
-        if norm(h) in aliases: return h
-    for h in headers:
-        if any(a in norm(h) for a in aliases): return h
+def text(v):
+    return "" if v is None or pd.isna(v) else str(v).strip()
+def norm(v):
+    return re.sub(r"\s+"," ",re.sub(r"[^a-z0-9]+"," ",text(v).lower().replace("&"," and "))).strip()
+def tokens(v):
+    return {x for x in norm(v).split() if not x.isdigit()}-STOP-LOC
+def find_col(cols, aliases):
+    ns={norm(c):c for c in cols}
+    for a in aliases:
+        if norm(a) in ns:return ns[norm(a)]
+    for c in cols:
+        if any(norm(a) in norm(c) for a in aliases):return c
     return None
+def header_row(raw, groups, limit=15):
+    best=(-1,None)
+    for i in range(min(limit,len(raw))):
+        vals=[norm(v) for v in raw.iloc[i].tolist() if text(v)]
+        score=sum(any(norm(a)==v or norm(a) in v for v in vals for a in group) for group in groups)
+        if score>best[0]:best=(score,i)
+    return best[1] if best[0]==len(groups) else None
+def all_sheets(upload):
+    return pd.read_excel(BytesIO(upload.getvalue()),sheet_name=None,header=None,dtype=object)
+def detect_sheet(sheets, groups, preferred=None):
+    order=list(sheets)
+    if preferred:
+        order=([s for s in order if norm(s)==norm(preferred)]+[s for s in order if norm(s)!=norm(preferred)])
+    for s in order:
+        h=header_row(sheets[s],groups)
+        if h is not None:return s,h
+    raise ValueError("Could not automatically detect a required worksheet/header. Check that the expected columns exist.")
+def table(upload,sheet,h):
+    d=pd.read_excel(BytesIO(upload.getvalue()),sheet_name=sheet,header=h,dtype=object).dropna(how="all").copy()
+    d.columns=[str(c).strip() for c in d.columns]
+    return d
+def arc_products(df):
+    ru=find_col(df.columns,["Resource Unit (RU)","Resource Unit"])
+    sn=find_col(df.columns,["S.No.","Serial No","S No"])
+    qty=find_col(df.columns,["Baseline Volume","Baseline Qty","Baseline Quantity"])
+    if not ru:raise ValueError("ARC RRC Resource Unit (RU) column was not found.")
+    if sn:df=df[pd.to_numeric(df[sn],errors="coerce").notna()]
+    out=[];seen=set()
+    for _,r in df.iterrows():
+        name=text(r.get(ru)); key=norm(name)
+        if name and key not in seen:
+            out.append({"ru":name,"qty":r.get(qty) if qty else None});seen.add(key)
+    return out
+def alias_for_ru(ru, template):
+    col=find_col(template.columns,["SOW Product Name","SOW Product Name (Display text : this is Item Description on Invoice)"])
+    if not col:return ru
+    rt=tokens(ru); loc=set(norm(ru).split())&LOC; choices=[]
+    for val in template[col].dropna():
+        name=text(val); cloc=set(norm(name).split())&LOC
+        if loc and cloc and loc!=cloc:continue
+        ct=tokens(name)
+        if rt and rt.issubset(ct):choices.append((len(ct-rt),name))
+    return sorted(choices)[0][1] if choices else ru
+def score_product(product, desc):
+    pt=tokens(product); dt=tokens(desc)
+    if not pt or not dt:return 0
+    pl=set(norm(product).split())&LOC; dl=set(norm(desc).split())&LOC
+    if pl and dl and pl.isdisjoint(dl):return 0
+    coverage=len(pt&dt)/len(pt)
+    if len(pt)<=2 and coverage<1:return 0
+    if len(pt)==3 and coverage<2/3:return 0
+    if len(pt)>=3:
+        server=bool(pt&{"wintel","linux","aix","vxrail"})
+        if coverage<(0.2 if server else 0.5):return 0
+    return round(coverage*100,1)
+def match_products(products,vbrp,template):
+    desc_col=find_col(vbrp.columns,["Item Description"])
+    if not desc_col:raise ValueError("VBRP Item Description column was not found.")
+    v=vbrp[vbrp[desc_col].notna()].copy();v[desc_col]=v[desc_col].map(text)
+    descs=list(dict.fromkeys(x for x in v[desc_col] if x));out=[]
+    for p in products:
+        alias=alias_for_ru(p["ru"],template)
+        scored=[(d,score_product(alias,d),fuzz.ratio(alias,d,processor=utils.default_process)) for d in descs]
+        scored=[x for x in scored if x[1]>0]
+        exact=[x for x in scored if x[2]>=98]
+        if exact:scored=exact
+        else:scored.sort(key=lambda x:(x[1],x[2]),reverse=True)
+        ambiguous=len(scored)>1
+        for desc,score,exactness in scored:
+            rows=v[v[desc_col].str.casefold()==desc.casefold()]
+            for _,r in rows.iterrows():
+                status="Exact description" if exactness>=98 else ("Review required" if ambiguous or score<90 else "Strong product-token match")
+                out.append({"ru":p["ru"],"alias":alias,"qty":p["qty"],"desc":desc,"score":score,"status":status,"vbrp":r.to_dict()})
+    owners={}
+    for m in out:owners.setdefault(norm(m["desc"]),set()).add(norm(m["ru"]))
+    for m in out:
+        if len(owners[norm(m["desc"])])>1:m["status"]="Review required — shared by multiple RU names"
+    return out
+def copy_style(ws,src,dst,n):
+    for c in range(1,n+1):
+        a,b=ws.cell(src,c),ws.cell(dst,c)
+        if a.has_style:b._style=copy(a._style)
+        if a.number_format:b.number_format=a.number_format
+        if a.alignment:b.alignment=copy(a.alignment)
+        if a.protection:b.protection=copy(a.protection)
 
-def workbook_sheets(upload):
-    return pd.read_excel(BytesIO(upload.getvalue()), sheet_name=None, header=None, dtype=object)
-
-def analyse_template(raw_sheets):
-    candidates = []
-    for name, raw in raw_sheets.items():
-        hr = detect_header(raw, template=True)
-        headers, df = make_table(raw, hr)
-        tower = find_header_col(headers, ["Tower"])
-        track = find_header_col(headers, ["Track"])
-        score = (20 if tower else 0) + (20 if track else 0)
-        score += sum(3 for x in ["Customer ID","Device ID","SOW Product Name","Rating Model","#Key"] if find_header_col(headers,[x]))
-        candidates.append((score, name, hr, headers, df, tower, track))
-    candidates.sort(key=lambda x:x[0], reverse=True)
-    return candidates[0]
-
-def extract_mapping_rules(sheet_tables):
-    rules, mapping_sheets = [], []
-    for sheet, (headers, df, _) in sheet_tables.items():
-        tower_col = find_header_col(headers, ["Tower"])
-        track_col = find_header_col(headers, ["Track"])
-        if not tower_col or not track_col: continue
-        mapping_sheets.append(sheet)
-        keyword_cols = [h for h in headers if h not in {tower_col, track_col} and any(k in norm(h) for k in ["service","description","product","item","resource","ru","keyword","name","towertrack"])]
-        if not keyword_cols:
-            keyword_cols = [h for h in headers if h not in {tower_col, track_col}]
-        for _, row in df.iterrows():
-            tw, tr = clean(row.get(tower_col)), clean(row.get(track_col))
-            if not tw or not tr: continue
-            for col in keyword_cols:
-                key = clean(row.get(col))
-                if len(key) >= 4:
-                    rules.append((key.lower(), tw, tr, sheet))
-    # Keep all rules; collisions are detected when matching a row.
-    return rules, mapping_sheets
-
-def match_tower_track(row, rules):
-    haystack = " | ".join(clean(v).lower() for v in row.tolist() if clean(v))
-    found = []
-    for keyword, tower, track, source in rules:
-        if keyword in haystack:
-            found.append((len(keyword), tower, track, keyword, source))
-    if not found: return "", "", "No matching Tower/Track rule found"
-    found.sort(key=lambda x:x[0], reverse=True)
-    best_len = found[0][0]
-    best = {(x[1], x[2]) for x in found if x[0] == best_len}
-    if len(best) > 1: return "", "", "Conflicting mapping rules — review required"
-    tower, track = next(iter(best))
-    return tower, track, f"Matched '{found[0][3]}' from {found[0][4]}"
-
-def copy_style(ws, source_row, target_row, max_col):
-    if source_row < 1: return
-    for c in range(1, max_col+1):
-        src, dst = ws.cell(source_row,c), ws.cell(target_row,c)
-        if src.has_style: dst._style = copy(src._style)
-        if src.number_format: dst.number_format = src.number_format
-
-st.markdown("### Upload files")
-a,b = st.columns(2)
-with a: prebill = st.file_uploader("Pre-Bill workbook", type=["xlsx","xlsm"], key="pb")
-with b: template = st.file_uploader("Master Data Template", type=["xlsx","xlsm"], key="mt")
-if not prebill or not template:
-    st.info("Upload both Excel files. Worksheet and column configuration is automatic.")
-    st.stop()
-
+st.markdown("### Upload source workbooks")
+a,b,c=st.columns(3)
+with a: arc=st.file_uploader("1. ARC RRC workbook",type=["xlsx","xlsm"],key="arc")
+with b: vbrp=st.file_uploader("2. VBRP dump",type=["xlsx","xlsm"],key="vbrp")
+with c: tmpl=st.file_uploader("3. Master Data Template",type=["xlsx","xlsm"],key="template")
+if not all([arc,vbrp,tmpl]):
+    st.info("Upload all three files. Worksheets, headers and product matching are detected automatically.");st.stop()
 try:
-    src_raw = workbook_sheets(prebill)
-    tmpl_bytes = template.getvalue()
-    keep_vba = template.name.lower().endswith(".xlsm")
-    out_wb = load_workbook(BytesIO(tmpl_bytes), keep_vba=keep_vba)
-    tmpl_raw = workbook_sheets(template)
+    asheets=all_sheets(arc);vsheets=all_sheets(vbrp);tsheets=all_sheets(tmpl)
+    an,ah=detect_sheet(asheets,[["S.No.","Serial No"],["Resource Unit (RU)","Resource Unit"]],"ARC RRC")
+    vn,vh=detect_sheet(vsheets,[["Item Description"],["Project definition"],["CoCd","Company Code"]])
+    tn,th=detect_sheet(tsheets,[["SOW Product Name (Display text : this is Item Description on Invoice)","SOW Product Name"],["Customer ID"],["Company Code"]])
+    ad=table(arc,an,ah);vd=table(vbrp,vn,vh);td=table(tmpl,tn,th)
+    products=arc_products(ad);matches=match_products(products,vd,td)
 except Exception as e:
-    st.error(f"Unable to read the uploaded workbooks: {e}")
-    st.stop()
+    st.error(f"Automatic detection failed: {e}");st.stop()
 
-# Detect all source worksheet headers and classify sheets.
-source_tables = {}
-for name, raw in src_raw.items():
-    hr = detect_header(raw)
-    headers, df = make_table(raw, hr)
-    source_tables[name] = (headers, df, hr)
+matched={norm(m["ru"]) for m in matches};unmatched=[p["ru"] for p in products if norm(p["ru"]) not in matched]
+st.markdown("### Automatic detection")
+x,y,z,w=st.columns(4);x.metric("ARC RRC sheet",an);y.metric("VBRP sheet",vn);z.metric("Template sheet",tn);w.metric("RU product names",len(products))
+st.caption(f"Detected header rows: ARC RRC {ah+1}; VBRP {vh+1}; Template {th+1}.")
+if not matches:st.error("No plausible VBRP matches were found.");st.stop()
+cols=list(vd.columns)
+key_cols=[["Sold-to","Customer ID"],["StatKF","Device ID"],["CoCd","Company Code"],["Project definition","Project Code"],["Material"]]
+def match_key(m):
+    r=m["vbrp"];return tuple(norm(x) for x in [m["ru"],m["desc"]]+[text(r.get(find_col(cols,a))) if find_col(cols,a) else "" for a in key_cols])
+unique=[];seen=set()
+for m in matches:
+    k=match_key(m)
+    if k not in seen:seen.add(k);unique.append(m)
+review=sum(m["status"].startswith("Review required") for m in unique);high=len(unique)-review
+x,y,z=st.columns(3);x.metric("Unique VBRP product records",len(unique));y.metric("Exact / strong matches",high);z.metric("Needs review",review)
+st.dataframe(pd.DataFrame([{"ARC RRC RU Name":m["ru"],"VBRP Item Description":m["desc"],"Match Score":m["score"],"Match Status":m["status"]} for m in unique]),use_container_width=True,height=400)
+if unmatched:st.warning("No VBRP match detected for: "+", ".join(unmatched))
+st.caption("The existing template's SOW Product Name is used as an approved alias when its product terms clearly match the RU. Otherwise, the RU name is matched directly. Ambiguous matches are flagged; unmatched products are listed in Match_Audit.")
 
-rules, mapping_sheets = extract_mapping_rules(source_tables)
-template_pick = analyse_template(tmpl_raw)
-_, target_name, target_header_idx, target_headers, target_df, target_tower_header, target_track_header = template_pick
-target_ws = out_wb[target_name]
-
-# A source sheet is a data/RU sheet if it has actual records and is not an obvious cover/summary/mapping sheet.
-ru_sheets = []
-for name, (headers, df, hr) in source_tables.items():
-    n = norm(name)
-    if len(df) == 0: continue
-    if any(x in n for x in ["summary","cover","contents","index","mapping","masterdata","towertrack"]): continue
-    if name in mapping_sheets: continue
-    # Ignore sheets that are only a small lookup table; keep actual CPO/RU tabs.
-    ru_sheets.append(name)
-
-st.markdown("### Automatic detection results")
-m1,m2,m3,m4 = st.columns(4)
-for col, value, label in [
-    (m1, len(ru_sheets), "RU / data worksheets"),
-    (m2, len(mapping_sheets), "Mapping worksheets"),
-    (m3, target_name, "Detected template sheet"),
-    (m4, f"Row {target_header_idx+1}", "Template header row")
-]:
-    col.markdown(f'<div class="metric"><b>{value}</b><br><small>{label}</small></div>', unsafe_allow_html=True)
-
-st.caption("Detected template fields: " + ", ".join(target_headers[:35]))
-if not ru_sheets:
-    st.error("No data worksheets were detected in the Pre-Bill workbook. Check that the workbook contains populated RU sheets.")
-    st.stop()
-if not target_tower_header or not target_track_header:
-    st.error("The Master Data Template was detected, but its Tower and/or Track columns could not be identified by header. Please check that the template contains columns named Tower and Track.")
-    st.stop()
-
-if mapping_sheets:
-    st.success("Detected mapping source(s): " + ", ".join(mapping_sheets))
-else:
-    st.warning("No supporting worksheet with explicit Tower and Track columns was detected. The app will extract the data, but it will leave Tower/Track blank rather than invent business mappings.")
-
-# Extract rows and automatically map same-named columns to template.
-template_norm_to_col = {}
-for c in range(1, target_ws.max_column+1):
-    h = clean(target_ws.cell(target_header_idx+1,c).value)
-    if h: template_norm_to_col[norm(h)] = c
-
-output_records, source_counts = [], {}
-for sheet in ru_sheets:
-    headers, df, hr = source_tables[sheet]
-    source_counts[sheet] = len(df)
-    for _, row in df.iterrows():
-        if not any(clean(v) for v in row.tolist()): continue
-        tower, track, status = match_tower_track(row, rules)
-        record = {h: row.get(h) for h in headers}
-        record["Tower"] = tower
-        record["Track"] = track
-        record["_Source Sheet"] = sheet
-        record["_Mapping Status"] = status
-        output_records.append(record)
-
-if not output_records:
-    st.error("No data rows found in the detected RU worksheets.")
-    st.stop()
-
-preview = pd.DataFrame(output_records)
-# Show source sheet detection and mapping quality.
-st.markdown("### Extraction preview")
-x1,x2,x3 = st.columns(3)
-x1.metric("Extracted rows", len(preview))
-x2.metric("Tower/Track matched", int(((preview["Tower"] != "") & (preview["Track"] != "")).sum()))
-x3.metric("Needs mapping review", int(((preview["Tower"] == "") | (preview["Track"] == "")).sum()))
-with st.expander("Detected worksheets and row counts", expanded=False):
-    st.dataframe(pd.DataFrame([{"Worksheet":k,"Detected rows":v,"Header row":source_tables[k][2]+1} for k,v in source_counts.items()]), use_container_width=True)
-with st.expander("Preview extracted records", expanded=True):
-    st.dataframe(preview.head(200), use_container_width=True, height=420)
-
-st.markdown("### Generate Master Data Template")
-st.write("Source columns are copied automatically when their names match template column names. Tower and Track are written to the detected template columns.")
-if st.button("Generate completed Master Data Template", type="primary", use_container_width=True):
-    ws = out_wb[target_name]
-    start_row = max(ws.max_row + 1, target_header_idx + 2)
-    written = 0
-    for idx, rec in enumerate(output_records):
-        row_num = start_row + idx
-        copy_style(ws, max(target_header_idx+2, ws.max_row), row_num, max(ws.max_column, len(target_headers)))
-        for key, value in rec.items():
-            if key.startswith("_"): continue
-            target_col = template_norm_to_col.get(norm(key))
-            if target_col:
-                ws.cell(row_num, target_col).value = value
-        ws.cell(row_num, template_norm_to_col[norm(target_tower_header)]).value = rec["Tower"]
-        ws.cell(row_num, template_norm_to_col[norm(target_track_header)]).value = rec["Track"]
-        written += 1
-    result = BytesIO()
-    out_wb.save(result)
-    st.download_button("Download completed Master Data Template", data=result.getvalue(),
-        file_name="Master_Data_Template_Completed" + (".xlsm" if keep_vba else ".xlsx"),
-        mime="application/vnd.ms-excel.sheet.macroEnabled.12" if keep_vba else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    st.success(f"Prepared {written} rows in '{target_name}'.")
-    if any(not r["Tower"] or not r["Track"] for r in output_records):
-        st.warning("Some Tower/Track values are blank because no authoritative mapping rule matched. Review those rows before SAP migration.")
-    st.info("The workbook is prepared only; this app does not create or update SAP records.")
+if st.button("Generate Master Data Template",type="primary",use_container_width=True):
+    keep_vba=tmpl.name.lower().endswith(".xlsm");wb=load_workbook(BytesIO(tmpl.getvalue()),keep_vba=keep_vba);ws=wb[tn]
+    hr=th+1;headers=[text(ws.cell(hr,c).value) for c in range(1,ws.max_column+1)];hmap={norm(h):i+1 for i,h in enumerate(headers) if h}
+    first=hr+1;sow=find_col(td.columns,["SOW Product Name","SOW Product Name (Display text : this is Item Description on Invoice)"])
+    rowmap={}
+    if sow:
+        for ix,r in td.iterrows():
+            n=text(r.get(sow))
+            if n:rowmap.setdefault(norm(n),hr+1+int(ix))
+    used=set();nextrow=ws.max_row+1;written=0;audit=[]
+    tower=hmap.get(norm(find_col(headers,["Tower"]) or ""));track=hmap.get(norm(find_col(headers,["Track"]) or ""))
+    for rr in range(first,ws.max_row+1):
+        if tower:ws.cell(rr,tower).value=None
+        if track:ws.cell(rr,track).value=None
+    for m in unique:
+        r=m["vbrp"];source=rowmap.get(norm(m["alias"])) or rowmap.get(norm(m["ru"])) or rowmap.get(norm(m["desc"]))
+        if source and source not in used:outrow=source;used.add(source)
+        else:
+            outrow=nextrow;nextrow+=1;style=source or first
+            copy_style(ws,style,outrow,ws.max_column)
+            for cc in range(1,ws.max_column+1):ws.cell(outrow,cc).value=ws.cell(style,cc).value
+        def put(names,value):
+            h=find_col(headers,names)
+            if h:ws.cell(outrow,hmap[norm(h)]).value=value
+        sold=find_col(cols,["Sold-to","Customer ID"]);stat=find_col(cols,["StatKF","Device ID"]);cocd=find_col(cols,["CoCd","Company Code"]);proj=find_col(cols,["Project definition","Project Code"]);mat=find_col(cols,["Material"]);bill=find_col(cols,["Bill. Doc.","Billing Document"])
+        put(["SOW Product Name","SOW Product Name (Display text : this is Item Description on Invoice)"],m["desc"])
+        put(["Customer ID"],r.get(sold) if sold else None);put(["Device ID"],r.get(stat) if stat else None)
+        put(["Company Code","CoCd"],r.get(cocd) if cocd else None);put(["Project Code","Project definition"],r.get(proj) if proj else None)
+        put(["Tower"],None);put(["Track"],None);put(["Output 2 Name"],"QTY");put(["Output 2 Value"],m["qty"])
+        audit.append({"ARC RRC RU Name":m["ru"],"Lookup Product Label":m["alias"],"Template Output Row":outrow,"Baseline Volume":m["qty"],"VBRP Item Description":m["desc"],"Match Score":m["score"],"Match Status":m["status"],"Customer ID (Sold-to)":r.get(sold) if sold else None,"Device ID (StatKF)":r.get(stat) if stat else None,"Company Code (CoCd)":r.get(cocd) if cocd else None,"Project Code":r.get(proj) if proj else None,"Material":r.get(mat) if mat else None,"Billing Document":r.get(bill) if bill else None})
+        written+=1
+    for ru in unmatched:audit.append({"ARC RRC RU Name":ru,"Match Status":"No VBRP match"})
+    if "Match_Audit" in wb.sheetnames:del wb["Match_Audit"]
+    aw=wb.create_sheet("Match_Audit");adf=pd.DataFrame(audit)
+    for j,h in enumerate(adf.columns,1):aw.cell(1,j).value=h
+    for i,row in enumerate(adf.itertuples(index=False,name=None),2):
+        for j,val in enumerate(row,1):aw.cell(i,j).value=None if pd.isna(val) else val
+    aw.freeze_panes="A2";aw.auto_filter.ref=aw.dimensions
+    for col in aw.columns:
+        letter=col[0].column_letter;length=max(len(str(c.value)) if c.value is not None else 0 for c in col);aw.column_dimensions[letter].width=min(max(length+2,14),48)
+    buf=BytesIO();wb.save(buf)
+    st.success(f"Updated or generated {written} product records. Existing template rows were reused where possible.")
+    if review:st.warning(f"{review} records need product-match review. See the Match_Audit worksheet before SAP migration.")
+    st.download_button("Download completed Master Data Template",data=buf.getvalue(),file_name="Master_Data_Template_Product_Matched"+(".xlsm" if keep_vba else ".xlsx"),mime="application/vnd.ms-excel.sheet.macroEnabled.12" if keep_vba else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True)
+    st.info("This tool prepares the workbook only; it does not create or update SAP records.")
