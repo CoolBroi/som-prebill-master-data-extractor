@@ -86,26 +86,32 @@ def score_product(product, desc):
     return round(coverage*100,1)
 def match_products(products,vbrp,template):
     desc_col=find_col(vbrp.columns,["Item Description"])
+    date_col=find_col(vbrp.columns,["Pricing Date","Pricing date","Price Date"])
     if not desc_col:raise ValueError("VBRP Item Description column was not found.")
     v=vbrp[vbrp[desc_col].notna()].copy();v[desc_col]=v[desc_col].map(text)
+    v["_pricing_date"]=pd.to_datetime(v[date_col],errors="coerce",dayfirst=True) if date_col else pd.NaT
     descs=list(dict.fromkeys(x for x in v[desc_col] if x));out=[]
     for p in products:
         alias=alias_for_ru(p["ru"],template)
         scored=[(d,score_product(alias,d),fuzz.ratio(alias,d,processor=utils.default_process)) for d in descs]
         scored=[x for x in scored if x[1]>0]
+        if not scored:continue
         exact=[x for x in scored if x[2]>=98]
         if exact:scored=exact
-        else:scored.sort(key=lambda x:(x[1],x[2]),reverse=True)
-        ambiguous=len(scored)>1
-        for desc,score,exactness in scored:
-            rows=v[v[desc_col].str.casefold()==desc.casefold()]
-            for _,r in rows.iterrows():
-                status="Exact description" if exactness>=98 else ("Review required" if ambiguous or score<90 else "Strong product-token match")
-                out.append({"ru":p["ru"],"alias":alias,"qty":p["qty"],"desc":desc,"score":score,"status":status,"vbrp":r.to_dict()})
-    owners={}
-    for m in out:owners.setdefault(norm(m["desc"]),set()).add(norm(m["ru"]))
-    for m in out:
-        if len(owners[norm(m["desc"])])>1:m["status"]="Review required — shared by multiple RU names"
+        best_score=max(x[1] for x in scored)
+        best_exact=max(x[2] for x in scored if x[1]==best_score)
+        top=[x for x in scored if x[1]==best_score and x[2]==best_exact]
+        candidate_descs={x[0] for x in top}
+        candidates=v[v[desc_col].isin(candidate_descs)].copy()
+        candidates=candidates.sort_values("_pricing_date",ascending=False,na_position="last",kind="stable")
+        chosen=candidates.iloc[0]
+        desc=text(chosen.get(desc_col));score=best_score;exactness=best_exact
+        if len(candidate_descs)>1:
+            status="Review required — competing descriptions; latest Pricing Date selected"
+        else:
+            status="Exact description" if exactness>=98 else ("Review required" if score<90 else "Strong product-token match")
+        row=chosen.drop(labels=["_pricing_date"]).to_dict()
+        out.append({"ru":p["ru"],"alias":alias,"qty":p["qty"],"desc":desc,"score":score,"status":status,"pricing_date":chosen.get("_pricing_date"),"vbrp":row})
     return out
 def copy_style(ws,src,dst,n):
     for c in range(1,n+1):
@@ -147,7 +153,7 @@ for m in matches:
     if k not in seen:seen.add(k);unique.append(m)
 review=sum(m["status"].startswith("Review required") for m in unique);high=len(unique)-review
 x,y,z=st.columns(3);x.metric("Unique VBRP product records",len(unique));y.metric("Exact / strong matches",high);z.metric("Needs review",review)
-st.dataframe(pd.DataFrame([{"ARC RRC RU Name":m["ru"],"VBRP Item Description":m["desc"],"Match Score":m["score"],"Match Status":m["status"]} for m in unique]),use_container_width=True,height=400)
+st.dataframe(pd.DataFrame([{"ARC RRC RU Name":m["ru"],"VBRP Item Description":m["desc"],"Pricing Date":m.get("pricing_date"),"Match Score":m["score"],"Match Status":m["status"]} for m in unique]),use_container_width=True,height=400)
 if unmatched:st.warning("No VBRP match detected for: "+", ".join(unmatched))
 st.caption("The existing template's SOW Product Name is used as an approved alias when its product terms clearly match the RU. Otherwise, the RU name is matched directly. Ambiguous matches are flagged; unmatched products are listed in Match_Audit.")
 
