@@ -102,6 +102,20 @@ def detect_prebill(sheets):
     for sn,raw in sheets.items():
         sheet_found=[]
         fallback=[]
+        # ARC/RRC ratecards have one authoritative RU table. Other rows may
+        # contain phrases such as "service" that resemble headers, so anchor
+        # extraction to the exact Resource Unit (RU) header only.
+        if norm(sn) in {"arc rrc","arc rrc ratecard","arc rrc rates"}:
+            for hi in range(min(15,len(raw))):
+                headers=[text(x) for x in raw.iloc[hi].tolist()]
+                ru_cols=[j for j,h in enumerate(headers) if norm(h) in {"resource unit ru","resource unit"}]
+                if ru_cols:
+                    qty_cols=[j for j,h in enumerate(headers) if norm(h) in {"baseline volume","baseline qty","baseline quantity","quantity","qty","volume"}]
+                    sheet_found=[{"sheet":sn,"header":hi,"col":ru_cols[0],"qty":qty_cols[0] if qty_cols else None,"score":12}]
+                    break
+            if sheet_found:
+                found.extend(sheet_found)
+                continue
         for hi in range(min(60,len(raw))):
             headers=[text(x) for x in raw.iloc[hi].tolist()]
             if not any(headers): continue
