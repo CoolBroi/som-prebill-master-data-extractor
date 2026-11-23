@@ -114,7 +114,7 @@ def table_end(raw, header_idx, product_col):
                 end=ri-1;break
             continue
         blanks=0
-        if re.search(r"\b(grand\s+total|sub\s*total|subtotal|total\s+amount|total\s+qty|notes?:|footnote)\b",rowtxt):
+        if re.search(r"\b(grand\s+total|sub\s*total|subtotal|total\s+amount|total\s+qty|notes?\s*:|footnote)\b",rowtxt):
             end=ri;break
         if not product:
             blanks+=1
