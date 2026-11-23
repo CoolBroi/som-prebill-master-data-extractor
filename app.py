@@ -48,9 +48,16 @@ def latest_month_sheet(sheets):
             years=re.findall(r"\\b(?:19|20)\\d{2}\\b",text(name))
             year=int(years[-1]) if years else 0
             candidates.append(((year,max(found),index),name))
-    if not candidates:
-        raise ValueError("Could not identify a month in any worksheet name. Please name the monthly tabs with the month (for example, CPO Tab July) so the latest month can be selected.")
-    return max(candidates,key=lambda x:x[0])[1]
+    if candidates:
+        return max(candidates,key=lambda x:x[0])[1]
+    # ARC/RRC workbooks keep the resource list in a dedicated "ARC RRC" tab;
+    # month labels are in the data columns/summary, not in the tab name.
+    for name in sheets:
+        if norm(name) in {"arc rrc","arc rrc ratecard","arc rrc rates"}:
+            return name
+    if len(sheets)==1:
+        return next(iter(sheets))
+    raise ValueError("Could not identify a month-named worksheet or an ARC RRC resource sheet. Please check the worksheet names.")
 def detect_sheet(sheets, groups, preferred=None):
     order=list(sheets)
     if preferred:
@@ -239,6 +246,7 @@ if "confirmed_products" not in st.session_state:
             st.error("Please keep at least one product/service name.")
         else:
             st.session_state["confirmed_products"]=clean
+            st.session_state["step2_ready"]=False
             st.rerun()
     st.stop()
 
@@ -249,7 +257,15 @@ with st.expander("View confirmed product list",expanded=False):
 if st.button("Reset and review Pre-Bill products"):
     st.session_state.pop("confirmed_products",None)
     st.session_state.pop("prebill_editor",None)
+    st.session_state.pop("step2_ready",None)
     st.rerun()
+
+if not st.session_state.get("step2_ready",False):
+    st.info("Your RU list is confirmed. Select Continue to move to the VBRP and Master Data Template upload.")
+    if st.button("Continue to Step 2 — Upload VBRP and Master Data Template",type="primary",use_container_width=True):
+        st.session_state["step2_ready"]=True
+        st.rerun()
+    st.stop()
 
 st.divider()
 st.markdown("### Step 2 — Upload VBRP and Master Data Template")
