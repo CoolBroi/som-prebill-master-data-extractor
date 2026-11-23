@@ -165,11 +165,11 @@ def copy_style(ws,src,dst,n):
 
 st.markdown("### Upload source workbooks")
 a,b,c=st.columns(3)
-with a: arc=st.file_uploader("1. ARC RRC workbook",type=["xlsx","xlsm"],key="arc")
+with a: arc=st.file_uploader("1. Pre-Bill workbook (any format)",type=["xlsx","xlsm"],key="arc")
 with b: vbrp=st.file_uploader("2. VBRP dump",type=["xlsx","xlsm"],key="vbrp")
 with c: tmpl=st.file_uploader("3. Master Data Template",type=["xlsx","xlsm"],key="template")
 if not all([arc,vbrp,tmpl]):
-    st.info("Upload all three files. Worksheets, headers and product matching are detected automatically.");st.stop()
+    st.info("Upload your Pre-Bill workbook, VBRP dump and Master Data Template. Pre-Bill worksheet names and product columns are detected automatically.");st.stop()
 try:
     asheets=all_sheets(arc);vsheets=all_sheets(vbrp);tsheets=all_sheets(tmpl)
     an,ah,ad,prebill_product_col,prebill_qty_col=detect_prebill(asheets)
