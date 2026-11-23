@@ -111,7 +111,8 @@ def detect_prebill(sheets):
                 ru_cols=[j for j,h in enumerate(headers) if norm(h) in {"resource unit ru","resource unit"}]
                 if ru_cols:
                     qty_cols=[j for j,h in enumerate(headers) if norm(h) in {"baseline volume","baseline qty","baseline quantity","quantity","qty","volume"}]
-                    sheet_found=[{"sheet":sn,"header":hi,"col":ru_cols[0],"qty":qty_cols[0] if qty_cols else None,"score":12}]
+                    serial_cols=[j for j,h in enumerate(headers) if norm(h) in {"s no","s no.","serial no","serial number"}]
+                    sheet_found=[{"sheet":sn,"header":hi,"col":ru_cols[0],"qty":qty_cols[0] if qty_cols else None,"serial":serial_cols[0] if serial_cols else None,"score":12}]
                     break
             if sheet_found:
                 found.extend(sheet_found)
@@ -155,6 +156,7 @@ def prebill_products(sheets, detections):
             key=norm(name)
             if not name or len(key)<2: continue
             if any(x in key for x in ["grand total","sub total","subtotal","total amount","continued"]): continue
+            if d.get("serial") is not None and not text(raw.iat[ri,d["serial"]]): continue
             # Keep only the first occurrence of each normalized product/service name.
             if key in seen_names: continue
             seen_names.add(key)
