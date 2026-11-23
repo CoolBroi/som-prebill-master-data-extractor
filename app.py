@@ -116,6 +116,12 @@ def table_end(raw, header_idx, product_col):
         blanks=0
         if re.search(r"\b(grand\s+total|sub\s*total|subtotal|total\s+amount|total\s+qty|notes?:|footnote)\b",rowtxt):
             end=ri;break
+        if not product:
+            blanks+=1
+            if blanks>=2:
+                end=ri-1;break
+        else:
+            blanks=0
         if product and re.match(r"^(note|remarks?|source:|prepared by|continued)\b",product,re.I):
             end=ri;break
     return max(header_idx+1,end)
@@ -472,7 +478,7 @@ if duplicates:
         conflicts=[x for x in duplicates if x["quantity_conflict"]]
         if conflicts:st.error(f"{len(conflicts)} duplicates have conflicting quantities. Check which quantity should be retained.")
 edit_df=pd.DataFrame([{"Product / Service Name":p["ru"],"Quantity / Volume":p["qty"],"Source Sheet":p["source_sheet"],"Source Row":p["source_row"],"Source Column":p["source_column"]} for p in products])
-edited=st.data_editor(edit_df,use_container_width=True,height=420,num_rows="dynamic",key="prebill_editor",column_config={"Product / Service Name":st.column_config.TextColumn("Product / Service Name",required=True),"Quantity / Volume":st.column_config.NumberColumn("Quantity / Volume"),"Source Sheet":st.column_config.TextColumn("Source Sheet",disabled=True),"Source Row":st.column_config.NumberColumn("Source Row",disabled=True),"Source Column":st.column_config.TextColumn("Source Column",disabled=True)})
+edited=st.data_editor(edit_df,use_container_width=True,height=420,num_rows="dynamic",key="prebill_editor_"+sha256(str((sel_sheet,sel_header,sel_col,sel_qty,chosen_month)).encode()).hexdigest()[:10],column_config={"Product / Service Name":st.column_config.TextColumn("Product / Service Name",required=True),"Quantity / Volume":st.column_config.NumberColumn("Quantity / Volume"),"Source Sheet":st.column_config.TextColumn("Source Sheet",disabled=True),"Source Row":st.column_config.NumberColumn("Source Row",disabled=True),"Source Column":st.column_config.TextColumn("Source Column",disabled=True)})
 if st.button("Confirm product list",type="primary",use_container_width=True):
     clean=[];seen={}
     for _,row in edited.iterrows():
