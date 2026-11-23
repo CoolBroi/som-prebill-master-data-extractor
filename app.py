@@ -438,7 +438,7 @@ state=st.session_state["detection_state"]
 sheet_options=list(asheets.keys())
 sel_sheet=st.selectbox("Sheet",sheet_options,index=sheet_options.index(state["sheet"]) if state["sheet"] in sheet_options else 0,key="detect_sheet")
 headers_raw=asheets[sel_sheet]
-header_options=list(range(min(80,len(headers_raw))))
+header_options=list(range(len(headers_raw)))
 sel_header=st.selectbox("Header row",header_options,index=min(state["header"],len(header_options)-1),format_func=lambda x:f"Excel row {x+1}",key="detect_header")
 headers=[text(x) or f"Column {i+1}" for i,x in enumerate(headers_raw.iloc[sel_header].tolist())]
 col_options=list(range(len(headers)))
