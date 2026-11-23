@@ -38,7 +38,7 @@ def norm(v):
 
 def tokens(v):
     # Numeric tokens are deliberately retained (e.g. Linux 8 vs Linux 9).
-    return {x for x in norm(v).split() if x not in GENERIC_STOP and x not in LOC}
+    return {x for x in norm(v).split() if x not in GENERIC_STOP and x not in LOC and x not in MONTH_WORDS and not re.fullmatch(r"(?:19|20)\\d{2}",x)}
 
 def find_col(cols, aliases):
     normalized=[norm(c) for c in cols]
@@ -54,6 +54,16 @@ def find_col(cols, aliases):
 
 def all_sheets(upload):
     return pd.read_excel(BytesIO(upload.getvalue()),sheet_name=None,header=None,dtype=object)
+
+def detect_sheet(sheets, groups, preferred=None):
+    order=list(sheets)
+    if preferred in order:order=[preferred]+[s for s in order if s!=preferred]
+    for sn,raw in ((s,sheets[s]) for s in order):
+        for hi in range(min(80,len(raw))):
+            vals=[norm(x) for x in raw.iloc[hi].tolist()]
+            if all(any(norm(alias)==v or norm(alias) in v for v in vals for alias in group) for group in groups):
+                return sn,hi
+    raise ValueError("Could not detect a worksheet/header containing the required columns: "+", ".join("/".join(g) for g in groups))
 
 def month_key(value):
     if isinstance(value,(pd.Timestamp,datetime,date)):
@@ -83,7 +93,7 @@ def months_in_sheets(sheets):
     for sn,raw in sheets.items():
         k=month_key(sn)
         if k:found.add(k)
-        for row in raw.head(80).itertuples(index=False,name=None):
+        for row in raw.itertuples(index=False,name=None):
             for v in row:
                 k=month_key(v)
                 if k:found.add(k)
@@ -444,7 +454,8 @@ preview=headers_raw.iloc[sel_header:min(end_row,sel_header+16)].copy()
 preview.columns=[text(x) or f"Column {i+1}" for i,x in enumerate(headers_raw.iloc[sel_header].tolist())]
 st.markdown("#### Detection preview")
 st.caption(f"Selected range: {sel_sheet}, Excel rows {sel_header+1}–{end_row}. Product-column confidence: {'High' if selected_candidate['score']>=9 else 'Medium' if selected_candidate['score']>=7 else 'Low'} (score {selected_candidate['score']:.1f}).")
-st.dataframe(preview, use_container_width=True, height=300)
+preview_style=preview.style.apply(lambda col: ["background-color: rgba(40, 160, 100, 0.22)" if col.name==headers[sel_col] else "" for _ in col],axis=0)
+st.dataframe(preview_style, use_container_width=True, height=300)
 if len(candidates)>1 and candidates[0]["score"]-candidates[1]["score"]<=1.0:
     st.warning(f"Two candidate columns have similar scores ({candidates[0]['score']:.1f} and {candidates[1]['score']:.1f}). Please verify the highlighted product column before confirming.")
 try:
