@@ -156,7 +156,7 @@ def prebill_products(sheets, detections):
             key=norm(name)
             if not name or len(key)<2: continue
             if any(x in key for x in ["grand total","sub total","subtotal","total amount","continued"]): continue
-            if d.get("serial") is not None and not text(raw.iat[ri,d["serial"]]): continue
+            if d.get("serial") is not None and not re.fullmatch(r"[0-9]+",text(raw.iat[ri,d["serial"]])): continue
             # Keep only the first occurrence of each normalized product/service name.
             if key in seen_names: continue
             seen_names.add(key)
