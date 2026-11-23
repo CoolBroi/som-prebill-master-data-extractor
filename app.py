@@ -210,7 +210,7 @@ def rows_for_candidate(raw,candidate,month_choice):
         name=text(raw.iat[ri,ci])
         if not name:continue
         rowtxt=" ".join(text(x).lower() for x in raw.iloc[ri].tolist())
-        if re.search(r"\b(grand\s+total|sub\s*total|subtotal|total\s+amount|continued|notes?\\s*:)\b",rowtxt):continue
+        if re.search(r"\b(grand\s+total|sub\s*total|subtotal|total\s+amount|continued|notes?:|footnote)",rowtxt):continue
         if period_col is not None and selected_month is not None:
             rk=month_key(raw.iat[ri,period_col])
             if rk!=selected_month:continue
