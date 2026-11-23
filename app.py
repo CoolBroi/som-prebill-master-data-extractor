@@ -45,7 +45,7 @@ def latest_month_sheet(sheets):
         words=re.findall(r"[a-z]+",text(name).lower())
         found=[months[w] for w in words if w in months]
         if found:
-            years=re.findall(r"\\b(?:19|20)\\d{2}\\b",text(name))
+            years=re.findall(r"(?:19|20)[0-9]{2}",text(name))
             year=int(years[-1]) if years else 0
             candidates.append(((year,max(found),index),name))
     if candidates:
