@@ -131,7 +131,13 @@ def header_bonus(header):
     terms={"resource":1.8,"product":1.8,"service":1.5,"item":1.2,"description":1.2,"particular":1.0,"offering":.8,"deliverable":.8,"ru":.6}
     return min(2.5,sum(v for k,v in terms.items() if k in h))
 
-def content_column_score(values,header):
+def header_row_bonus(headers):
+    recognized=("resource","product","service","item","description","particular","offering","deliverable","ru","period","month","quantity","qty","volume","baseline","uom","unit")
+    count=sum(any(k in norm(h) for k in recognized) for h in headers if text(h))
+    return 2.0 if count>=2 else 0.0
+
+def content_column_score(values,header,headers=None):
+
     vals=[text(x) for x in values if text(x)]
     if len(vals)<3:return -100
     cleaned=[v for v in vals if not re.fullmatch(r"[-+]?\d+(?:[.,]\d+)?",v)]
@@ -139,7 +145,7 @@ def content_column_score(values,header):
     uniq=len({norm(v) for v in cleaned})/max(1,len(cleaned))
     avg=sum(len(v) for v in cleaned)/max(1,len(cleaned))
     moderate=max(0,1-abs(avg-28)/45)
-    score=6*text_ratio+3*uniq+2*moderate+header_bonus(header)
+    score=6*text_ratio+3*uniq+2*moderate+header_bonus(header)+(header_row_bonus(headers or []) if headers is not None else 0)
     h=norm(header)
     if any(k in h for k in ["id","code","number","serial","date","qty","quantity","amount","rate","price","currency","email","phone"]):score-=5
     if any(k in h for k in ["summary","total","inventory","category","department","tower","track","status","owner"]):score-=3
@@ -163,7 +169,7 @@ def detect_candidates(sheets):
             for ci,h in enumerate(headers):
                 end=table_end(raw,hi,ci)
                 vals=raw.iloc[hi+1:end,ci].tolist()
-                score=content_column_score(vals,h)
+                score=content_column_score(vals,h,headers)
                 if score<6.0:continue
                 # A header row should have a reasonable table beneath it.
                 nonblank=sum(bool(text(x)) for x in vals)
