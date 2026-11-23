@@ -80,21 +80,28 @@ def detect_prebill(sheets):
     # product/service columns instead of selecting only the single highest-scoring column.
     found=[]
     for sn,raw in sheets.items():
-        for hi in range(min(40,len(raw))):
+        sheet_found=[]
+        fallback=[]
+        for hi in range(min(60,len(raw))):
             headers=[text(x) for x in raw.iloc[hi].tolist()]
             if not any(headers): continue
             scores=[product_header_score(x) for x in headers]
             candidates=[j for j,s in enumerate(scores) if s>=5]
             if not candidates:
                 inferred=infer_product_column(raw,hi)
-                if inferred is not None: candidates=[inferred]
-            if not candidates: continue
+                if inferred is not None: fallback.append((hi,inferred))
+                continue
             qty_candidates=[j for j,h in enumerate(headers) if any(k in norm(h) for k in ["baseline volume","baseline qty","baseline quantity","quantity","qty","volume","units","no of","number of"])]
-            # Ignore header rows that only look plausible because of a random text column.
             for ci in candidates:
                 vals=[text(x) for x in raw.iloc[hi+1:min(len(raw),hi+101),ci].tolist() if text(x)]
                 if len(vals)<2: continue
-                found.append({"sheet":sn,"header":hi,"col":ci,"qty":qty_candidates[0] if qty_candidates else None,"score":scores[ci] if scores[ci]>=5 else 4})
+                sheet_found.append({"sheet":sn,"header":hi,"col":ci,"qty":qty_candidates[0] if qty_candidates else None,"score":scores[ci]})
+        # Use content-only inference once per sheet, and only when no recognizable
+        # product header was found. This avoids treating ordinary data rows as headers.
+        if not sheet_found and fallback:
+            hi,ci=max(fallback,key=lambda pair: len([x for x in raw.iloc[pair[0]+1:min(len(raw),pair[0]+101),pair[1]].tolist() if text(x)]))
+            sheet_found.append({"sheet":sn,"header":hi,"col":ci,"qty":None,"score":4})
+        found.extend(sheet_found)
     if not found:
         raise ValueError("Could not identify product/resource columns in any worksheet. Check that the workbook contains product/service names.")
     # Remove duplicate detections of the same table/header/column.
