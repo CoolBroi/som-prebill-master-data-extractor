@@ -66,7 +66,7 @@ def infer_product_column(raw,hi):
     for j,h in enumerate(raw.iloc[hi].tolist()):
         vals=[text(x) for x in sample.iloc[:,j].tolist() if text(x)]
         if len(vals)<2:continue
-        nonnumeric=sum(not re.fullmatch(r"[-+]?\\d+(?:[.,]\\d+)?",v) for v in vals)/len(vals)
+        nonnumeric=sum(not re.fullmatch(r"[-+]?\d+(?:[.,]\d+)?",v) for v in vals)/len(vals)
         unique=len({norm(v) for v in vals})/len(vals)
         avglen=sum(len(v) for v in vals)/len(vals)
         score=5*nonnumeric+3*unique+min(avglen,50)/50
