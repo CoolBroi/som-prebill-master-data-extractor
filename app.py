@@ -76,33 +76,47 @@ def infer_product_column(raw,hi):
         if score>best[0]:best=(score,j)
     return best[1] if best[0]>=6 else None
 def detect_prebill(sheets):
-    best=None
+    # Scan every worksheet and every plausible header row. Keep all credible
+    # product/service columns instead of selecting only the single highest-scoring column.
+    found=[]
     for sn,raw in sheets.items():
-        for hi in range(min(30,len(raw))):
+        for hi in range(min(40,len(raw))):
             headers=[text(x) for x in raw.iloc[hi].tolist()]
+            if not any(headers): continue
             scores=[product_header_score(x) for x in headers]
-            if not scores:continue
-            ci=max(range(len(scores)),key=lambda j:scores[j])
-            header_score=scores[ci]
-            if header_score<5:
+            candidates=[j for j,s in enumerate(scores) if s>=5]
+            if not candidates:
                 inferred=infer_product_column(raw,hi)
-                if inferred is None:continue
-                ci=inferred;header_score=5
+                if inferred is not None: candidates=[inferred]
+            if not candidates: continue
             qty_candidates=[j for j,h in enumerate(headers) if any(k in norm(h) for k in ["baseline volume","baseline qty","baseline quantity","quantity","qty","volume","units","no of","number of"])]
-            candidate=(header_score,sn,hi,ci,qty_candidates[0] if qty_candidates else None)
-            if best is None or candidate[0]>best[0]:best=candidate
-    if best is None:raise ValueError("Could not identify a product/resource column in the Pre-Bill. Expected a column containing product, service, resource, item or description names.")
-    _,sn,hi,ci,qi=best
-    df=table_from_raw(sheets[sn],hi)
-    return sn,hi,df,df.columns[ci],df.columns[qi] if qi is not None and qi<len(df.columns) else None
-def prebill_products(df,product_col,qty_col):
-    out=[];seen=set()
-    for _,r in df.iterrows():
-        name=text(r.get(product_col));key=norm(name)
-        if not name or len(key)<2 or key in seen:continue
-        if any(x in key for x in ["grand total","sub total","subtotal","total amount","continued"]):continue
-        out.append({"ru":name,"qty":r.get(qty_col) if qty_col else None});seen.add(key)
-    if not out:raise ValueError("No product/resource names were found in the detected Pre-Bill column.")
+            # Ignore header rows that only look plausible because of a random text column.
+            for ci in candidates:
+                vals=[text(x) for x in raw.iloc[hi+1:min(len(raw),hi+101),ci].tolist() if text(x)]
+                if len(vals)<2: continue
+                found.append({"sheet":sn,"header":hi,"col":ci,"qty":qty_candidates[0] if qty_candidates else None,"score":scores[ci] if scores[ci]>=5 else 4})
+    if not found:
+        raise ValueError("Could not identify product/resource columns in any worksheet. Check that the workbook contains product/service names.")
+    # Remove duplicate detections of the same table/header/column.
+    dedup={}
+    for x in found: dedup[(x["sheet"],x["header"],x["col"])]=x
+    return list(dedup.values())
+def prebill_products(sheets, detections):
+    out=[]
+    for d in detections:
+        raw=sheets[d["sheet"]]
+        headers=[text(x) for x in raw.iloc[d["header"]].tolist()]
+        name_col=headers[d["col"]] or f"Column {d['col']+1}"
+        qty_col=headers[d["qty"]] if d["qty"] is not None and d["qty"]<len(headers) else None
+        for ri in range(d["header"]+1,len(raw)):
+            name=text(raw.iat[ri,d["col"]])
+            key=norm(name)
+            if not name or len(key)<2: continue
+            if any(x in key for x in ["grand total","sub total","subtotal","total amount","continued"]): continue
+            # Keep repeated product names as separate source rows for user review.
+            qty=raw.iat[ri,d["qty"]] if d["qty"] is not None and d["qty"]<raw.shape[1] else None
+            out.append({"ru":name,"qty":qty,"source_sheet":d["sheet"],"source_row":ri+1,"source_column":name_col})
+    if not out: raise ValueError("No product/resource names were found in the detected columns.")
     return out
 def alias_for_ru(ru, template):
     col=find_col(template.columns,["SOW Product Name","SOW Product Name (Display text : this is Item Description on Invoice)"])
@@ -178,23 +192,21 @@ if st.session_state.get("prebill_signature")!=signature:
 if "confirmed_products" not in st.session_state:
     try:
         asheets=all_sheets(arc)
-        an,ah,ad,prebill_product_col,prebill_qty_col=detect_prebill(asheets)
-        extracted=prebill_products(ad,prebill_product_col,prebill_qty_col)
+        detections=detect_prebill(asheets)
+        extracted=prebill_products(asheets,detections)
     except Exception as e:
         st.error(f"Could not extract products from this Pre-Bill: {e}")
         st.stop()
-    st.success(f"Detected {len(extracted)} distinct product/service names in sheet '{an}'.")
-    st.caption(f"Detected header row: {ah+1}. Product column: {prebill_product_col}. Quantity column: {prebill_qty_col or 'not detected'}.")
-    edit_df=pd.DataFrame([{"Product / Service Name":p["ru"],"Quantity / Volume":p["qty"]} for p in extracted])
-    edited=st.data_editor(edit_df,use_container_width=True,height=420,num_rows="dynamic",key="prebill_editor",column_config={"Product / Service Name":st.column_config.TextColumn("Product / Service Name",required=True),"Quantity / Volume":st.column_config.TextColumn("Quantity / Volume")})
+    st.success(f"Detected {len(extracted)} product/service rows across {len(set(p['source_sheet'] for p in extracted))} worksheet(s). Repeated names are preserved.")
+    st.caption("All plausible product/service columns are scanned. Source sheet, row and column are shown so you can trace every extracted entry.")
+    edit_df=pd.DataFrame([{"Product / Service Name":p["ru"],"Quantity / Volume":p["qty"],"Source Sheet":p["source_sheet"],"Source Row":p["source_row"],"Source Column":p["source_column"]} for p in extracted])
+    edited=st.data_editor(edit_df,use_container_width=True,height=420,num_rows="dynamic",key="prebill_editor",column_config={"Product / Service Name":st.column_config.TextColumn("Product / Service Name",required=True),"Quantity / Volume":st.column_config.TextColumn("Quantity / Volume"),"Source Sheet":st.column_config.TextColumn("Source Sheet",disabled=True),"Source Row":st.column_config.NumberColumn("Source Row",disabled=True),"Source Column":st.column_config.TextColumn("Source Column",disabled=True)})
     if st.button("Confirm product list",type="primary",use_container_width=True):
         clean=[]
-        seen=set()
         for _,row in edited.iterrows():
-            name=text(row.get("Product / Service Name"));key=norm(name)
-            if not name or key in seen:continue
-            seen.add(key)
-            clean.append({"ru":name,"qty":row.get("Quantity / Volume")})
+            name=text(row.get("Product / Service Name"))
+            if not name: continue
+            clean.append({"ru":name,"qty":row.get("Quantity / Volume"),"source_sheet":text(row.get("Source Sheet")),"source_row":row.get("Source Row"),"source_column":text(row.get("Source Column"))})
         if not clean:
             st.error("Please keep at least one product/service name.")
         else:
@@ -205,7 +217,7 @@ if "confirmed_products" not in st.session_state:
 products=st.session_state["confirmed_products"]
 st.success(f"Product list confirmed: {len(products)} products/services.")
 with st.expander("View confirmed product list",expanded=False):
-    st.dataframe(pd.DataFrame([{"Product / Service Name":p["ru"],"Quantity / Volume":p.get("qty")} for p in products]),use_container_width=True)
+    st.dataframe(pd.DataFrame([{"Product / Service Name":p["ru"],"Quantity / Volume":p.get("qty"),"Source Sheet":p.get("source_sheet"),"Source Row":p.get("source_row"),"Source Column":p.get("source_column")} for p in products]),use_container_width=True)
 if st.button("Reset and review Pre-Bill products"):
     st.session_state.pop("confirmed_products",None)
     st.session_state.pop("prebill_editor",None)
@@ -237,16 +249,14 @@ key_cols=[["Sold-to","Customer ID"],["StatKF","Device ID"],["CoCd","Company Code
 def match_key(m):
     r=m["vbrp"]
     return tuple(norm(x) for x in [m["ru"],m["desc"]]+[text(r.get(find_col(cols,a))) if find_col(cols,a) else "" for a in key_cols])
-unique=[];seen=set()
-for m in matches:
-    k=match_key(m)
-    if k not in seen:seen.add(k);unique.append(m)
+# Preserve every confirmed Pre-Bill source row, including repeated product names.
+unique=matches
 review=sum(m["status"].startswith("Review required") for m in unique)
 high=len(unique)-review
 st.markdown("### VBRP matching results")
 x,y,z,w=st.columns(4)
 x.metric("Confirmed products",len(products));y.metric("VBRP matches",len(unique));z.metric("Exact / strong matches",high);w.metric("Needs review",review)
-st.caption(f"VBRP sheet: {vn}; template sheet: {tn}. Only one VBRP entry is selected per product, using the latest Pricing Date.")
+st.caption(f"VBRP sheet: {vn}; template sheet: {tn}. Every confirmed Pre-Bill row is retained. For each row, one VBRP entry is selected using the latest Pricing Date.")
 st.dataframe(pd.DataFrame([{"Pre-Bill Product / Service Name":m["ru"],"VBRP Item Description":m["desc"],"Pricing Date":m.get("pricing_date"),"Match Score":m["score"],"Match Status":m["status"]} for m in unique]),use_container_width=True,height=400)
 if unmatched:st.warning(f"{len(unmatched)} confirmed product(s) have no VBRP match: "+", ".join(unmatched))
 if not unique:
