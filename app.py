@@ -210,7 +210,7 @@ def rows_for_candidate(raw,candidate,month_choice):
         name=text(raw.iat[ri,ci])
         if not name:continue
         rowtxt=" ".join(text(x).lower() for x in raw.iloc[ri].tolist())
-        if re.search(r"\b(grand\s+total|sub\s*total|subtotal|total\s+amount|continued|notes?:)\b",rowtxt):continue
+        if re.search(r"\b(grand\s+total|sub\s*total|subtotal|total\s+amount|continued|notes?\\s*:)\b",rowtxt):continue
         if period_col is not None and selected_month is not None:
             rk=month_key(raw.iat[ri,period_col])
             if rk!=selected_month:continue
@@ -255,8 +255,8 @@ def score_product(product,desc):
     pt=tokens_match(product);dt=tokens_match(desc)
     if not pt or not dt:return 0
     # Do not let distinct numeric specifications collapse into one match.
-    pnums={x for x in norm(product).split() if x.isdigit() and not re.fullmatch(r"(?:19|20)\\d{2}",x)}
-    dnums={x for x in norm(desc).split() if x.isdigit() and not re.fullmatch(r"(?:19|20)\\d{2}",x)}
+    pnums={x for x in norm(product).split() if x.isdigit() and not re.fullmatch(r"(?:19|20)[0-9]{2}",x)}
+    dnums={x for x in norm(desc).split() if x.isdigit() and not re.fullmatch(r"(?:19|20)[0-9]{2}",x)}
     if pnums and not pnums.issubset(dnums):return 0
     pl=set(norm(product).split())&LOC;dl=set(norm(desc).split())&LOC
     if pl and dl and pl.isdisjoint(dl):return 0
