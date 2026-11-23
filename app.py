@@ -10,7 +10,7 @@ from rapidfuzz import fuzz, utils
 st.set_page_config(page_title="SOM Product Master Data Extractor", page_icon="📦", layout="wide")
 st.markdown("""
 <style>.block-container{max-width:1450px;padding-top:1.5rem}.hero{padding:1.4rem 1.7rem;border-radius:16px;background:linear-gradient(115deg,#14213d,#244b78);color:white;margin-bottom:1rem}.hero h1{color:white;margin:0 0 .35rem;font-size:2rem}.hero p{color:#dbeafe;margin:0}</style>
-<div class="hero"><h1>SOM Product Master Data Extractor</h1><p>Match ARC RRC Resource Unit names to VBRP Item Descriptions and populate the Master Data Template.</p></div>
+<div class="hero"><h1>SOM Product Master Data Extractor</h1><p>Match product/resource names from any Pre-Bill workbook to VBRP Item Descriptions and populate the Master Data Template.</p></div>
 """, unsafe_allow_html=True)
 
 STOP={"compute","support","service","services","management","license","licenses","charge","charges","the","and","for","of","on","to","month","monthly","one","time","billing","os","instance","years","year","committed","resource","unit","ru","february","march","april","2026"}
@@ -50,17 +50,40 @@ def table(upload,sheet,h):
     d=pd.read_excel(BytesIO(upload.getvalue()),sheet_name=sheet,header=h,dtype=object).dropna(how="all").copy()
     d.columns=[str(c).strip() for c in d.columns]
     return d
-def arc_products(df):
-    ru=find_col(df.columns,["Resource Unit (RU)","Resource Unit"])
-    sn=find_col(df.columns,["S.No.","Serial No","S No"])
-    qty=find_col(df.columns,["Baseline Volume","Baseline Qty","Baseline Quantity"])
-    if not ru:raise ValueError("ARC RRC Resource Unit (RU) column was not found.")
-    if sn:df=df[pd.to_numeric(df[sn],errors="coerce").notna()]
+def product_header_score(header):
+    h=norm(header)
+    if not h:return -10
+    if any(x in h for x in ["serial","s no","sequence","line number","row number","quantity","qty","amount","rate","price","date","total","currency","uom","unit of measure"]):return -5
+    terms={"resource unit":12,"resource name":11,"resource":7,"product name":12,"product":8,"service name":12,"service":7,"item description":11,"item name":11,"item":5,"description":7,"particulars":8,"scope of work":9,"work package":8,"offering":8,"component":6,"activity":6,"deliverable":7,"sku":7,"material description":8,"solution":5,"requirement":4}
+    return max([v for k,v in terms.items() if k in h]+[-2])
+def table_from_raw(raw,h):
+    d=raw.iloc[h+1:].copy()
+    d.columns=[str(x).strip() if text(x) else f"Unnamed_{i}" for i,x in enumerate(raw.iloc[h].tolist())]
+    return d.dropna(how="all").copy()
+def detect_prebill(sheets):
+    best=None
+    for sn,raw in sheets.items():
+        for hi in range(min(30,len(raw))):
+            headers=[text(x) for x in raw.iloc[hi].tolist()]
+            scores=[product_header_score(x) for x in headers]
+            if not scores:continue
+            ci=max(range(len(scores)),key=lambda j:scores[j])
+            if scores[ci]<5:continue
+            qty_candidates=[j for j,h in enumerate(headers) if any(k in norm(h) for k in ["baseline volume","baseline qty","baseline quantity","quantity","qty","volume","units","no of","number of"])]
+            candidate=(scores[ci],sn,hi,ci,qty_candidates[0] if qty_candidates else None)
+            if best is None or candidate[0]>best[0]:best=candidate
+    if best is None:raise ValueError("Could not identify a product/resource column in the Pre-Bill. Expected a column containing product, service, resource, item or description names.")
+    _,sn,hi,ci,qi=best
+    df=table_from_raw(sheets[sn],hi)
+    return sn,hi,df,df.columns[ci],df.columns[qi] if qi is not None and qi<len(df.columns) else None
+def prebill_products(df,product_col,qty_col):
     out=[];seen=set()
     for _,r in df.iterrows():
-        name=text(r.get(ru)); key=norm(name)
-        if name and key not in seen:
-            out.append({"ru":name,"qty":r.get(qty) if qty else None});seen.add(key)
+        name=text(r.get(product_col));key=norm(name)
+        if not name or len(key)<2 or key in seen:continue
+        if any(x in key for x in ["grand total","sub total","subtotal","total amount","continued"]):continue
+        out.append({"ru":name,"qty":r.get(qty_col) if qty_col else None});seen.add(key)
+    if not out:raise ValueError("No product/resource names were found in the detected Pre-Bill column.")
     return out
 def alias_for_ru(ru, template):
     col=find_col(template.columns,["SOW Product Name","SOW Product Name (Display text : this is Item Description on Invoice)"])
@@ -130,18 +153,18 @@ if not all([arc,vbrp,tmpl]):
     st.info("Upload all three files. Worksheets, headers and product matching are detected automatically.");st.stop()
 try:
     asheets=all_sheets(arc);vsheets=all_sheets(vbrp);tsheets=all_sheets(tmpl)
-    an,ah=detect_sheet(asheets,[["S.No.","Serial No"],["Resource Unit (RU)","Resource Unit"]],"ARC RRC")
+    an,ah,ad,prebill_product_col,prebill_qty_col=detect_prebill(asheets)
     vn,vh=detect_sheet(vsheets,[["Item Description"],["Project definition"],["CoCd","Company Code"]])
     tn,th=detect_sheet(tsheets,[["SOW Product Name (Display text : this is Item Description on Invoice)","SOW Product Name"],["Customer ID"],["Company Code"]])
-    ad=table(arc,an,ah);vd=table(vbrp,vn,vh);td=table(tmpl,tn,th)
-    products=arc_products(ad);matches=match_products(products,vd,td)
+    vd=table(vbrp,vn,vh);td=table(tmpl,tn,th)
+    products=prebill_products(ad,prebill_product_col,prebill_qty_col);matches=match_products(products,vd,td)
 except Exception as e:
     st.error(f"Automatic detection failed: {e}");st.stop()
 
 matched={norm(m["ru"]) for m in matches};unmatched=[p["ru"] for p in products if norm(p["ru"]) not in matched]
 st.markdown("### Automatic detection")
-x,y,z,w=st.columns(4);x.metric("ARC RRC sheet",an);y.metric("VBRP sheet",vn);z.metric("Template sheet",tn);w.metric("RU product names",len(products))
-st.caption(f"Detected header rows: ARC RRC {ah+1}; VBRP {vh+1}; Template {th+1}.")
+x,y,z,w=st.columns(4);x.metric("Pre-Bill sheet",an);y.metric("VBRP sheet",vn);z.metric("Template sheet",tn);w.metric("Product names",len(products))
+st.caption(f"Detected header rows: Pre-Bill {ah+1}; VBRP {vh+1}; Template {th+1}.")
 if not matches:st.error("No plausible VBRP matches were found.");st.stop()
 cols=list(vd.columns)
 key_cols=[["Sold-to","Customer ID"],["StatKF","Device ID"],["CoCd","Company Code"],["Project definition","Project Code"],["Material"]]
@@ -153,7 +176,7 @@ for m in matches:
     if k not in seen:seen.add(k);unique.append(m)
 review=sum(m["status"].startswith("Review required") for m in unique);high=len(unique)-review
 x,y,z=st.columns(3);x.metric("Unique VBRP product records",len(unique));y.metric("Exact / strong matches",high);z.metric("Needs review",review)
-st.dataframe(pd.DataFrame([{"ARC RRC RU Name":m["ru"],"VBRP Item Description":m["desc"],"Pricing Date":m.get("pricing_date"),"Match Score":m["score"],"Match Status":m["status"]} for m in unique]),use_container_width=True,height=400)
+st.dataframe(pd.DataFrame([{"Pre-Bill Product / Resource Name":m["ru"],"VBRP Item Description":m["desc"],"Pricing Date":m.get("pricing_date"),"Match Score":m["score"],"Match Status":m["status"]} for m in unique]),use_container_width=True,height=400)
 if unmatched:st.warning("No VBRP match detected for: "+", ".join(unmatched))
 st.caption("Only one VBRP row is selected per RU product. When multiple matching VBRP rows are available, the row with the latest Pricing Dt is selected. Competing product descriptions are flagged for review; unmatched products are listed in Match_Audit.")
 
