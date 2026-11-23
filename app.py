@@ -165,24 +165,27 @@ def detect_candidates(sheets):
             headers=[text(x) for x in raw.iloc[hi].tolist()]
             if sum(bool(x) for x in headers)<2:continue
             month_cols=month_col_indices(headers)
+            non_month_headers=[h for h in headers if h and month_key(h) is None and not re.fullmatch(r"[-+]?\d+(?:[.,]\d+)?",h)]
+            # Avoid interpreting ordinary data rows as headers. Wide month tables
+            # may have one descriptive header plus multiple month columns.
+            if len(non_month_headers)<2 and not (len(month_cols)>=2 and len(non_month_headers)>=1):continue
+            context=norm(" ".join(headers))
             for ci,h in enumerate(headers):
-                end=table_end(raw,hi,ci)
-                vals=raw.iloc[hi+1:end,ci].tolist()
-                score=content_column_score(vals,h,headers)
-                context=norm(" ".join(headers))
+                sample_end=min(len(raw),hi+51)
+                sample_vals=raw.iloc[hi+1:sample_end,ci].tolist()
+                score=content_column_score(sample_vals,h,headers)
                 if any(k in context for k in ["inventory","asset register","hardware stock","financial summary","management summary"]):
                     score-=5
                 if any(k in context for k in ["summary","grand total","subtotal"]):
                     score-=2
                 if score<6.0:continue
-                # A header row should have a reasonable table beneath it.
-                nonblank=sum(bool(text(x)) for x in vals)
-                if nonblank<3:continue
+                end=table_end(raw,hi,ci)
+                vals=raw.iloc[hi+1:end,ci].tolist()
+                if sum(bool(text(x)) for x in vals)<3:continue
                 qty=quantity_column_guess(headers)
                 candidates.append({"sheet":sn,"header":hi,"col":ci,"qty":qty,"score":round(score,2),"end":end,"months":month_cols})
     if not candidates:
         raise ValueError("Could not detect a product/resource table. Please use the Detection controls to inspect the workbook structure.")
-    # Collapse candidates with same sheet/header and retain column-level alternatives.
     candidates.sort(key=lambda x:x["score"],reverse=True)
     return candidates
 
