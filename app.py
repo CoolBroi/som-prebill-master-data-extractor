@@ -54,6 +54,8 @@ def product_header_score(header):
     h=norm(header)
     if not h:return -10
     if any(x in h for x in ["serial","s no","sequence","line number","row number","quantity","qty","amount","rate","price","date","total","currency","uom","unit of measure"]):return -5
+    if any(x in h for x in ["infrastructure services","business unit","service category","service line","tower","department","division"]):return -3
+    if any(x in h for x in ["service area/domain","service area","service domain","product/service","service description"]):return 16
     terms={"resource unit":12,"resource name":11,"resource":7,"product name":12,"product":8,"service name":12,"service":7,"item description":11,"item name":11,"item":5,"description":7,"particulars":8,"scope of work":9,"work package":8,"offering":8,"component":6,"activity":6,"deliverable":7,"sku":7,"material description":8,"solution":5,"requirement":4}
     return max([v for k,v in terms.items() if k in h]+[-2])
 def table_from_raw(raw,h):
