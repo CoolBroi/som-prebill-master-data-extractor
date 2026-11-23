@@ -122,7 +122,7 @@ def table_end(raw, header_idx, product_col):
                 end=ri-1;break
         else:
             blanks=0
-        if product and re.match(r"^(note|remarks?|source:|prepared by|continued)\b",product,re.I):
+        if product and re.match(r"^(notes?|remarks?|source:|prepared by|continued)\b",product,re.I):
             end=ri;break
     return max(header_idx+1,end)
 
@@ -255,8 +255,8 @@ def score_product(product,desc):
     pt=tokens_match(product);dt=tokens_match(desc)
     if not pt or not dt:return 0
     # Do not let distinct numeric specifications collapse into one match.
-    pnums={x for x in norm(product).split() if x.isdigit()}
-    dnums={x for x in norm(desc).split() if x.isdigit()}
+    pnums={x for x in norm(product).split() if x.isdigit() and not re.fullmatch(r"(?:19|20)\\d{2}",x)}
+    dnums={x for x in norm(desc).split() if x.isdigit() and not re.fullmatch(r"(?:19|20)\\d{2}",x)}
     if pnums and not pnums.issubset(dnums):return 0
     pl=set(norm(product).split())&LOC;dl=set(norm(desc).split())&LOC
     if pl and dl and pl.isdisjoint(dl):return 0
