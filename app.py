@@ -38,6 +38,19 @@ def header_row(raw, groups, limit=15):
     return best[1] if best[0]==len(groups) else None
 def all_sheets(upload):
     return pd.read_excel(BytesIO(upload.getvalue()),sheet_name=None,header=None,dtype=object)
+def latest_month_sheet(sheets):
+    months={"january":1,"jan":1,"february":2,"feb":2,"march":3,"mar":3,"april":4,"apr":4,"may":5,"june":6,"jun":6,"july":7,"jul":7,"august":8,"aug":8,"september":9,"sep":9,"sept":9,"october":10,"oct":10,"november":11,"nov":11,"december":12,"dec":12}
+    candidates=[]
+    for index,name in enumerate(sheets):
+        words=re.findall(r"[a-z]+",text(name).lower())
+        found=[months[w] for w in words if w in months]
+        if found:
+            years=re.findall(r"\\b(?:19|20)\\d{2}\\b",text(name))
+            year=int(years[-1]) if years else 0
+            candidates.append(((year,max(found),index),name))
+    if not candidates:
+        raise ValueError("Could not identify a month in any worksheet name. Please name the monthly tabs with the month (for example, CPO Tab July) so the latest month can be selected.")
+    return max(candidates,key=lambda x:x[0])[1]
 def detect_sheet(sheets, groups, preferred=None):
     order=list(sheets)
     if preferred:
@@ -110,6 +123,7 @@ def detect_prebill(sheets):
     return list(dedup.values())
 def prebill_products(sheets, detections):
     out=[]
+    seen_names=set()
     for d in detections:
         raw=sheets[d["sheet"]]
         headers=[text(x) for x in raw.iloc[d["header"]].tolist()]
@@ -120,7 +134,9 @@ def prebill_products(sheets, detections):
             key=norm(name)
             if not name or len(key)<2: continue
             if any(x in key for x in ["grand total","sub total","subtotal","total amount","continued"]): continue
-            # Keep repeated product names as separate source rows for user review.
+            # Keep only the first occurrence of each normalized product/service name.
+            if key in seen_names: continue
+            seen_names.add(key)
             qty=raw.iat[ri,d["qty"]] if d["qty"] is not None and d["qty"]<raw.shape[1] else None
             out.append({"ru":name,"qty":qty,"source_sheet":d["sheet"],"source_row":ri+1,"source_column":name_col})
     if not out: raise ValueError("No product/resource names were found in the detected columns.")
@@ -199,20 +215,25 @@ if st.session_state.get("prebill_signature")!=signature:
 if "confirmed_products" not in st.session_state:
     try:
         asheets=all_sheets(arc)
-        detections=detect_prebill(asheets)
-        extracted=prebill_products(asheets,detections)
+        latest_sheet=latest_month_sheet(asheets)
+        latest_sheets={latest_sheet:asheets[latest_sheet]}
+        detections=detect_prebill(latest_sheets)
+        extracted=prebill_products(latest_sheets,detections)
     except Exception as e:
         st.error(f"Could not extract products from this Pre-Bill: {e}")
         st.stop()
-    st.success(f"Detected {len(extracted)} product/service rows across {len(set(p['source_sheet'] for p in extracted))} worksheet(s). Repeated names are preserved.")
-    st.caption("All plausible product/service columns are scanned. Source sheet, row and column are shown so you can trace every extracted entry.")
+    st.success(f"Detected {len(extracted)} unique product/service names from the latest month worksheet: {latest_sheet}. Duplicate names are removed.")
+    st.caption("Only the latest month worksheet is scanned. Duplicate names are removed case-insensitively after normalizing spaces and punctuation. Source row and column are shown for traceability.")
     edit_df=pd.DataFrame([{"Product / Service Name":p["ru"],"Quantity / Volume":p["qty"],"Source Sheet":p["source_sheet"],"Source Row":p["source_row"],"Source Column":p["source_column"]} for p in extracted])
     edited=st.data_editor(edit_df,use_container_width=True,height=420,num_rows="dynamic",key="prebill_editor",column_config={"Product / Service Name":st.column_config.TextColumn("Product / Service Name",required=True),"Quantity / Volume":st.column_config.TextColumn("Quantity / Volume"),"Source Sheet":st.column_config.TextColumn("Source Sheet",disabled=True),"Source Row":st.column_config.NumberColumn("Source Row",disabled=True),"Source Column":st.column_config.TextColumn("Source Column",disabled=True)})
     if st.button("Confirm product list",type="primary",use_container_width=True):
         clean=[]
+        confirmed_seen=set()
         for _,row in edited.iterrows():
             name=text(row.get("Product / Service Name"))
-            if not name: continue
+            key=norm(name)
+            if not name or key in confirmed_seen: continue
+            confirmed_seen.add(key)
             clean.append({"ru":name,"qty":row.get("Quantity / Volume"),"source_sheet":text(row.get("Source Sheet")),"source_row":row.get("Source Row"),"source_column":text(row.get("Source Column"))})
         if not clean:
             st.error("Please keep at least one product/service name.")
