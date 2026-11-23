@@ -427,7 +427,8 @@ if st.session_state.get("prebill_signature")!=signature:
         st.session_state.pop(key,None)
 
 try:
-    asheets=all_sheets(arc)
+    asheets={name:frame for name,frame in all_sheets(arc).items() if not frame.dropna(how="all").empty}
+    if not asheets:raise ValueError("The uploaded workbook contains no non-empty worksheets.")
     candidates=detect_candidates(asheets)
 except Exception as e:
     st.error(f"Could not profile the Pre-Bill workbook: {e}")
