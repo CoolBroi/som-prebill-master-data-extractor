@@ -161,8 +161,7 @@ def quantity_column_guess(headers):
 def detect_candidates(sheets):
     candidates=[]
     for sn,raw in sheets.items():
-        max_header=min(80,len(raw))
-        for hi in range(max_header):
+        for hi in range(len(raw)):
             headers=[text(x) for x in raw.iloc[hi].tolist()]
             if sum(bool(x) for x in headers)<2:continue
             month_cols=month_col_indices(headers)
