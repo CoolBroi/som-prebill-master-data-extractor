@@ -163,70 +163,134 @@ def copy_style(ws,src,dst,n):
         if a.alignment:b.alignment=copy(a.alignment)
         if a.protection:b.protection=copy(a.protection)
 
-st.markdown("### Upload source workbooks")
-a,b,c=st.columns(3)
-with a: arc=st.file_uploader("1. Pre-Bill workbook (any format)",type=["xlsx","xlsm"],key="arc")
-with b: vbrp=st.file_uploader("2. VBRP dump",type=["xlsx","xlsm"],key="vbrp")
-with c: tmpl=st.file_uploader("3. Master Data Template",type=["xlsx","xlsm"],key="template")
-if not all([arc,vbrp,tmpl]):
-    st.info("Upload your Pre-Bill workbook, VBRP dump and Master Data Template. Pre-Bill worksheet names and product columns are detected automatically.");st.stop()
+st.markdown("### Step 1 — Upload and review Pre-Bill products")
+arc=st.file_uploader("Upload Pre-Bill workbook (any Excel layout)",type=["xlsx","xlsm"],key="prebill_upload")
+if not arc:
+    st.info("Start by uploading only the Pre-Bill workbook. VBRP is not needed at this stage.")
+    st.stop()
+
+signature=(arc.name,len(arc.getvalue()))
+if st.session_state.get("prebill_signature")!=signature:
+    st.session_state["prebill_signature"]=signature
+    st.session_state.pop("confirmed_products",None)
+    st.session_state.pop("prebill_editor",None)
+
+if "confirmed_products" not in st.session_state:
+    try:
+        asheets=all_sheets(arc)
+        an,ah,ad,prebill_product_col,prebill_qty_col=detect_prebill(asheets)
+        extracted=prebill_products(ad,prebill_product_col,prebill_qty_col)
+    except Exception as e:
+        st.error(f"Could not extract products from this Pre-Bill: {e}")
+        st.stop()
+    st.success(f"Detected {len(extracted)} distinct product/service names in sheet '{an}'.")
+    st.caption(f"Detected header row: {ah+1}. Product column: {prebill_product_col}. Quantity column: {prebill_qty_col or 'not detected'}.")
+    edit_df=pd.DataFrame([{"Product / Service Name":p["ru"],"Quantity / Volume":p["qty"]} for p in extracted])
+    edited=st.data_editor(edit_df,use_container_width=True,height=420,num_rows="dynamic",key="prebill_editor",column_config={"Product / Service Name":st.column_config.TextColumn("Product / Service Name",required=True),"Quantity / Volume":st.column_config.TextColumn("Quantity / Volume")})
+    if st.button("Confirm product list",type="primary",use_container_width=True):
+        clean=[]
+        seen=set()
+        for _,row in edited.iterrows():
+            name=text(row.get("Product / Service Name"));key=norm(name)
+            if not name or key in seen:continue
+            seen.add(key)
+            clean.append({"ru":name,"qty":row.get("Quantity / Volume")})
+        if not clean:
+            st.error("Please keep at least one product/service name.")
+        else:
+            st.session_state["confirmed_products"]=clean
+            st.rerun()
+    st.stop()
+
+products=st.session_state["confirmed_products"]
+st.success(f"Product list confirmed: {len(products)} products/services.")
+with st.expander("View confirmed product list",expanded=False):
+    st.dataframe(pd.DataFrame([{"Product / Service Name":p["ru"],"Quantity / Volume":p.get("qty")} for p in products]),use_container_width=True)
+if st.button("Reset and review Pre-Bill products"):
+    st.session_state.pop("confirmed_products",None)
+    st.session_state.pop("prebill_editor",None)
+    st.rerun()
+
+st.divider()
+st.markdown("### Step 2 — Upload VBRP and Master Data Template")
+a,b=st.columns(2)
+with a:vbrp=st.file_uploader("Upload VBRP dump",type=["xlsx","xlsm"],key="vbrp_upload")
+with b:tmpl=st.file_uploader("Upload Master Data Template",type=["xlsx","xlsm"],key="template_upload")
+if not vbrp or not tmpl:
+    st.info("Your product list is saved. Upload VBRP and the Master Data Template to find the corresponding entries.")
+    st.stop()
+
 try:
-    asheets=all_sheets(arc);vsheets=all_sheets(vbrp);tsheets=all_sheets(tmpl)
-    an,ah,ad,prebill_product_col,prebill_qty_col=detect_prebill(asheets)
+    vsheets=all_sheets(vbrp);tsheets=all_sheets(tmpl)
     vn,vh=detect_sheet(vsheets,[["Item Description"],["Project definition"],["CoCd","Company Code"]])
     tn,th=detect_sheet(tsheets,[["SOW Product Name (Display text : this is Item Description on Invoice)","SOW Product Name"],["Customer ID"],["Company Code"]])
     vd=table(vbrp,vn,vh);td=table(tmpl,tn,th)
-    products=prebill_products(ad,prebill_product_col,prebill_qty_col);matches=match_products(products,vd,td)
+    matches=match_products(products,vd,td)
 except Exception as e:
-    st.error(f"Automatic detection failed: {e}");st.stop()
+    st.error(f"VBRP or template detection failed: {e}")
+    st.stop()
 
-matched={norm(m["ru"]) for m in matches};unmatched=[p["ru"] for p in products if norm(p["ru"]) not in matched]
-st.markdown("### Automatic detection")
-x,y,z,w=st.columns(4);x.metric("Pre-Bill sheet",an);y.metric("VBRP sheet",vn);z.metric("Template sheet",tn);w.metric("Product names",len(products))
-st.caption(f"Detected header rows: Pre-Bill {ah+1}; VBRP {vh+1}; Template {th+1}.")
-if not matches:st.error("No plausible VBRP matches were found.");st.stop()
+matched={norm(m["ru"]) for m in matches}
+unmatched=[p["ru"] for p in products if norm(p["ru"]) not in matched]
 cols=list(vd.columns)
 key_cols=[["Sold-to","Customer ID"],["StatKF","Device ID"],["CoCd","Company Code"],["Project definition","Project Code"],["Material"]]
 def match_key(m):
-    r=m["vbrp"];return tuple(norm(x) for x in [m["ru"],m["desc"]]+[text(r.get(find_col(cols,a))) if find_col(cols,a) else "" for a in key_cols])
+    r=m["vbrp"]
+    return tuple(norm(x) for x in [m["ru"],m["desc"]]+[text(r.get(find_col(cols,a))) if find_col(cols,a) else "" for a in key_cols])
 unique=[];seen=set()
 for m in matches:
     k=match_key(m)
     if k not in seen:seen.add(k);unique.append(m)
-review=sum(m["status"].startswith("Review required") for m in unique);high=len(unique)-review
-x,y,z=st.columns(3);x.metric("Unique VBRP product records",len(unique));y.metric("Exact / strong matches",high);z.metric("Needs review",review)
-st.dataframe(pd.DataFrame([{"Pre-Bill Product / Resource Name":m["ru"],"VBRP Item Description":m["desc"],"Pricing Date":m.get("pricing_date"),"Match Score":m["score"],"Match Status":m["status"]} for m in unique]),use_container_width=True,height=400)
-if unmatched:st.warning("No VBRP match detected for: "+", ".join(unmatched))
-st.caption("Only one VBRP row is selected per RU product. When multiple matching VBRP rows are available, the row with the latest Pricing Dt is selected. Competing product descriptions are flagged for review; unmatched products are listed in Match_Audit.")
+review=sum(m["status"].startswith("Review required") for m in unique)
+high=len(unique)-review
+st.markdown("### VBRP matching results")
+x,y,z,w=st.columns(4)
+x.metric("Confirmed products",len(products));y.metric("VBRP matches",len(unique));z.metric("Exact / strong matches",high);w.metric("Needs review",review)
+st.caption(f"VBRP sheet: {vn}; template sheet: {tn}. Only one VBRP entry is selected per product, using the latest Pricing Date.")
+st.dataframe(pd.DataFrame([{"Pre-Bill Product / Service Name":m["ru"],"VBRP Item Description":m["desc"],"Pricing Date":m.get("pricing_date"),"Match Score":m["score"],"Match Status":m["status"]} for m in unique]),use_container_width=True,height=400)
+if unmatched:st.warning(f"{len(unmatched)} confirmed product(s) have no VBRP match: "+", ".join(unmatched))
+if not unique:
+    st.error("No confirmed products matched VBRP. Your full confirmed product list is retained above; no template records can be generated until a match is found.")
+    st.stop()
 
 if st.button("Generate Master Data Template",type="primary",use_container_width=True):
-    keep_vba=tmpl.name.lower().endswith(".xlsm");wb=load_workbook(BytesIO(tmpl.getvalue()),keep_vba=keep_vba);ws=wb[tn]
-    hr=th+1;headers=[text(ws.cell(hr,c).value) for c in range(1,ws.max_column+1)];hmap={norm(h):i+1 for i,h in enumerate(headers) if h}
-    first=hr+1;sow=find_col(td.columns,["SOW Product Name","SOW Product Name (Display text : this is Item Description on Invoice)"])
+    keep_vba=tmpl.name.lower().endswith(".xlsm")
+    wb=load_workbook(BytesIO(tmpl.getvalue()),keep_vba=keep_vba)
+    ws=wb[tn]
+    hr=th+1
+    headers=[text(ws.cell(hr,c).value) for c in range(1,ws.max_column+1)]
+    hmap={norm(h):i+1 for i,h in enumerate(headers) if h}
+    first=hr+1
+    sow=find_col(td.columns,["SOW Product Name","SOW Product Name (Display text : this is Item Description on Invoice)"])
     rowmap={}
     if sow:
         for ix,r in td.iterrows():
             n=text(r.get(sow))
             if n:rowmap.setdefault(norm(n),hr+1+int(ix))
     used=set();nextrow=ws.max_row+1;written=0
+    sold=find_col(cols,["Sold-to","Customer ID"]);stat=find_col(cols,["StatKF","Device ID"])
+    cocd=find_col(cols,["CoCd","Company Code"]);proj=find_col(cols,["Project definition","Project Code"])
     for m in unique:
-        r=m["vbrp"];source=rowmap.get(norm(m["alias"])) or rowmap.get(norm(m["ru"])) or rowmap.get(norm(m["desc"]))
-        if source and source not in used:outrow=source;used.add(source)
+        r=m["vbrp"]
+        source=rowmap.get(norm(m["alias"])) or rowmap.get(norm(m["ru"])) or rowmap.get(norm(m["desc"]))
+        if source and source not in used:
+            outrow=source;used.add(source)
         else:
-            outrow=nextrow;nextrow+=1;style=source or first
+            outrow=nextrow;nextrow+=1;style=first
             copy_style(ws,style,outrow,ws.max_column)
             for cc in range(1,ws.max_column+1):ws.cell(outrow,cc).value=ws.cell(style,cc).value
         def put(names,value):
             h=find_col(headers,names)
             if h:ws.cell(outrow,hmap[norm(h)]).value=value
-        sold=find_col(cols,["Sold-to","Customer ID"]);stat=find_col(cols,["StatKF","Device ID"]);cocd=find_col(cols,["CoCd","Company Code"]);proj=find_col(cols,["Project definition","Project Code"])
         put(["SOW Product Name","SOW Product Name (Display text : this is Item Description on Invoice)"],m["desc"])
-        put(["Customer ID"],r.get(sold) if sold else None);put(["Device ID"],r.get(stat) if stat else None)
-        put(["Company Code","CoCd"],r.get(cocd) if cocd else None);put(["Project Code","Project definition"],r.get(proj) if proj else None)
+        put(["Customer ID"],r.get(sold) if sold else None)
+        put(["Device ID"],r.get(stat) if stat else None)
+        put(["Company Code","CoCd"],r.get(cocd) if cocd else None)
+        put(["Project Code","Project definition"],r.get(proj) if proj else None)
         put(["Output 2 Name"],"QTY");put(["Output 2 Value"],m["qty"])
         written+=1
     buf=BytesIO();wb.save(buf)
-    st.success(f"Generated {written} product records directly in the original Master Data Template format. The template's worksheets, columns and formatting are retained.")
-    if review:st.warning(f"{review} selected records need review. Check the match status shown above before using the workbook.")
+    st.success(f"Generated {written} matched product records in the original Master Data Template format.")
+    if review:st.warning(f"{review} selected VBRP matches need review before SAP upload.")
     st.download_button("Download completed Master Data Template",data=buf.getvalue(),file_name="Master_Data_Template_Product_Matched"+(".xlsm" if keep_vba else ".xlsx"),mime="application/vnd.ms-excel.sheet.macroEnabled.12" if keep_vba else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True)
     st.info("This tool prepares the workbook only; it does not create or update SAP records.")
