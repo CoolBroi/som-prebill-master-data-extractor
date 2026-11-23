@@ -60,6 +60,19 @@ def table_from_raw(raw,h):
     d=raw.iloc[h+1:].copy()
     d.columns=[str(x).strip() if text(x) else f"Unnamed_{i}" for i,x in enumerate(raw.iloc[h].tolist())]
     return d.dropna(how="all").copy()
+def infer_product_column(raw,hi):
+    sample=raw.iloc[hi+1:hi+min(35,len(raw))].copy()
+    best=(-1,None)
+    for j,h in enumerate(raw.iloc[hi].tolist()):
+        vals=[text(x) for x in sample.iloc[:,j].tolist() if text(x)]
+        if len(vals)<2:continue
+        nonnumeric=sum(not re.fullmatch(r"[-+]?\\d+(?:[.,]\\d+)?",v) for v in vals)/len(vals)
+        unique=len({norm(v) for v in vals})/len(vals)
+        avglen=sum(len(v) for v in vals)/len(vals)
+        score=5*nonnumeric+3*unique+min(avglen,50)/50
+        if any(k in norm(h) for k in ["id","code","number","date","qty","quantity","amount","rate","price"]):score-=4
+        if score>best[0]:best=(score,j)
+    return best[1] if best[0]>=6 else None
 def detect_prebill(sheets):
     best=None
     for sn,raw in sheets.items():
@@ -68,9 +81,13 @@ def detect_prebill(sheets):
             scores=[product_header_score(x) for x in headers]
             if not scores:continue
             ci=max(range(len(scores)),key=lambda j:scores[j])
-            if scores[ci]<5:continue
+            header_score=scores[ci]
+            if header_score<5:
+                inferred=infer_product_column(raw,hi)
+                if inferred is None:continue
+                ci=inferred;header_score=5
             qty_candidates=[j for j,h in enumerate(headers) if any(k in norm(h) for k in ["baseline volume","baseline qty","baseline quantity","quantity","qty","volume","units","no of","number of"])]
-            candidate=(scores[ci],sn,hi,ci,qty_candidates[0] if qty_candidates else None)
+            candidate=(header_score,sn,hi,ci,qty_candidates[0] if qty_candidates else None)
             if best is None or candidate[0]>best[0]:best=candidate
     if best is None:raise ValueError("Could not identify a product/resource column in the Pre-Bill. Expected a column containing product, service, resource, item or description names.")
     _,sn,hi,ci,qi=best
