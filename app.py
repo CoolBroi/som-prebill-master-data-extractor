@@ -170,6 +170,11 @@ def detect_candidates(sheets):
                 end=table_end(raw,hi,ci)
                 vals=raw.iloc[hi+1:end,ci].tolist()
                 score=content_column_score(vals,h,headers)
+                context=norm(" ".join(headers))
+                if any(k in context for k in ["inventory","asset register","hardware stock","financial summary","management summary"]):
+                    score-=5
+                if any(k in context for k in ["summary","grand total","subtotal"]):
+                    score-=2
                 if score<6.0:continue
                 # A header row should have a reasonable table beneath it.
                 nonblank=sum(bool(text(x)) for x in vals)
